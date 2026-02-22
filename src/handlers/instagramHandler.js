@@ -38,7 +38,7 @@ async function waitUntilFinished(containerId, token, maxAttempts = 20) {
 }
 
 async function uploadToInstagram(post, account) {
-  const baseUrl = `${instagramAPIUrl}/${account.ig_id}`;
+  const baseUrl = `${instagramAPIUrl}/${account.ac_id}`;
   const accessToken = account.authorizationKey;
   const mediaType = mediaTypes[post.type] || 'IMAGE';
 

@@ -1,6 +1,5 @@
 const express = require('express');
 const { initFirebase } = require('./config/firebase');
-const { uploadContentHandler } = require('./handlers/uploadContent');
 const { publishContentHandler } = require('./handlers/publishContent');
 
 const app = express();
@@ -10,12 +9,8 @@ const port = process.env.PORT || 8080;
 
 const { admin, db, storage } = initFirebase();
 
-app.get('/api/content/upload', async (req, res) => {
-  return uploadContentHandler({ db, storage }, req, res);
-});
-
 app.get('/api/content/publish', async (req, res) => {
-  return publishContentHandler({ admin, db }, req, res);
+  return publishContentHandler({ db, storage }, req, res);
 });
 
 app.listen(port, () => {

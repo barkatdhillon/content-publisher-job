@@ -3,3 +3,5 @@ node_modules
 .DS_Store
 *.json
 !package.json
+.idea
+*-sa.json

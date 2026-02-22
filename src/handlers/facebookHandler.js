@@ -92,7 +92,7 @@ async function uploadToMyPage(baseUrl, pageAccessToken, post) {
 }
 
 async function uploadToFacebook(post, account) {
-  const baseUrl = `${facebookAPIUrl}/${account.fb_id}`;
+  const baseUrl = `${facebookAPIUrl}/${account.ac_id}`;
   const accessToken = account.authorizationKey;
   const mediaType = mediaTypes[post.type] || 'IMAGE';
 
