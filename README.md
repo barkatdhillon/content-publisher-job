@@ -19,7 +19,6 @@ npm start
 
 ## API
 
-- `POST /api/content/upload`
 - `POST /api/content/publish`
 
 ## Deploy to Cloud Run

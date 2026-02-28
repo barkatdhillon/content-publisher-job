@@ -5,39 +5,8 @@ const instagramAPIUrl = 'https://graph.facebook.com/v24.0'
 
 const mediaTypes = {'Image': 'IMAGE', 'Video': 'VIDEO', 'Reel': 'REELS', 'Carousel': 'CAROUSEL'}
 
-async function waitUntilFinished(containerId, token, maxAttempts = 20) {
-  let attempts = 0;
 
-  while (attempts < maxAttempts) {
-    const res = await axios.get(
-      `${instagramAPIUrl}/${containerId}`,
-      {
-        params: {
-          fields: "status_code",
-          access_token: token
-        }
-      }
-    );
-
-    const status = res.data.status_code;
-
-    if (status === "FINISHED") {
-      return true;
-    }
-
-    if (status === "ERROR") {
-      throw new Error(`Media processing failed: ${containerId}`);
-    }
-
-    attempts++;
-    console.log(`Sleep for 3 seconds - ${attempts} attempts`);
-    await sleep(3000); // wait 3 seconds before checking again
-  }
-
-  throw new Error("Media processing timeout");
-}
-
-async function publishToInstagram(post, account) {
+async function publishToPinterest(post, account) {
   const baseUrl = `${instagramAPIUrl}/${account.ac_id}`;
   const accessToken = account.authorizationKey;
   const mediaType = mediaTypes[post.type] || 'IMAGE';
@@ -155,5 +124,5 @@ async function publishToInstagram(post, account) {
 }
 
 module.exports = {
-  uploadToInstagram: publishToInstagram
+  publishToPinterest
 };

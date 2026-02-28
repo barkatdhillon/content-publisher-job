@@ -2,6 +2,7 @@ const { parseCsvEnv, applyStatusFilter } = require('../utils/firestoreFilters');
 const { hydratePostUrls } = require('../services/postUrlHydration');
 const { uploadToInstagram } = require('./instagramHandler');
 const { uploadToFacebook } = require('./facebookHandler');
+const { publishToPinterest } = require('./pinterestHandler');
 const { Timestamp } = require('firebase-admin/firestore');
 
 async function publishContentHandler({ db, storage }, req, res) {
@@ -79,6 +80,12 @@ async function publishContentHandler({ db, storage }, req, res) {
                 account,
                 upload: { accountId: account.id, ...result }
               };
+            } else if (account.platform === 'Pinterest') {
+                const result = await publishToPinterest(post, account);
+                return {
+                    account,
+                    upload: { accountId: account.id, ...result }
+                };
             }
             return { account, upload: null };
           })
