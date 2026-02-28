@@ -2,7 +2,7 @@ const { parseCsvEnv, applyStatusFilter } = require('../utils/firestoreFilters');
 const { hydratePostUrls } = require('../services/postUrlHydration');
 const { uploadToInstagram } = require('./instagramHandler');
 const { uploadToFacebook } = require('./facebookHandler');
-const { publishToPinterest } = require('./pinterestHandler');
+const { publishToPinterest, fetchPinterestBoards, refreshPinterestToken, generatePinAccessTokens } = require('./pinterestHandler');
 const { Timestamp } = require('firebase-admin/firestore');
 
 async function publishContentHandler({ db, storage }, req, res) {
@@ -129,6 +129,102 @@ async function publishContentHandler({ db, storage }, req, res) {
   }
 }
 
+async function syncPinterestBoards(db, req, res) {
+    try {
+        // Get all Pinterest platform accounts
+        const snapshot = await db.collection('platform_accounts')
+            .where('platform', '==', 'Pinterest')
+            .get();
+
+        if (snapshot.empty) {
+            console.log('No Pinterest accounts found');
+            return res.status(404).json({ ok: false, message: 'No Pinterest accounts found' });
+        }
+
+        const pinterestAccounts = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+        // Fetch boards for each account and update
+        const updatePromises = pinterestAccounts.map(async (account) => {
+            try {
+                const tokens = await refreshPinterestToken(account);
+                await db.collection('platform_accounts').doc(account.id).update({
+                    accessToken: tokens.access_token,
+                    refreshToken: tokens.refresh_token,
+                    lastTokenSyncTime: Timestamp.now()
+                });
+
+                const boards = await fetchPinterestBoards(account);
+
+                // Update the account document with boards list
+                await db.collection('platform_accounts').doc(account.id).update({
+                    boards: boards,
+                    lastBoardsSyncTime: Timestamp.now()
+                });
+
+                return { accountId: account.id, success: true, boardsCount: boards.length };
+            } catch (error) {
+                console.error(`Error syncing boards for account ${account.id}:`, error);
+                return { accountId: account.id, success: false, error: error.message };
+            }
+        });
+
+        const results = await Promise.all(updatePromises);
+        res.json({ ok: true, results });
+    } catch (error) {
+        console.error('Error in syncPinterestBoards:', error);
+        res.status(500).json({ ok: false, error: error.message });
+    }
+}
+
+async function generatePinterestTokens(db, req, res) {
+    try {
+        // Get all Pinterest platform accounts with pinCode defined
+        const snapshot = await db.collection('platform_accounts')
+            .where('platform', '==', 'Pinterest')
+            .get();
+
+        if (snapshot.empty) {
+            console.log('No Pinterest accounts found');
+            return res.status(404).json({ ok: false, message: 'No Pinterest accounts found' });
+        }
+
+        // Filter accounts that have pinCode defined (not null/undefined)
+        const pinterestAccounts = snapshot.docs
+            .map(doc => ({ id: doc.id, ...doc.data() }))
+            .filter(account => account.pinCode != null);
+
+        if (pinterestAccounts.length === 0) {
+            console.log('No Pinterest accounts with pinCode found');
+            return res.status(404).json({ ok: false, message: 'No Pinterest accounts with pinCode found' });
+        }
+
+        // Generate tokens for each account
+        const updatePromises = pinterestAccounts.map(async (account) => {
+            try {
+                const tokens = await generatePinAccessTokens(account);
+                await db.collection('platform_accounts').doc(account.id).update({
+                    accessToken: tokens.access_token,
+                    refreshToken: tokens.refresh_token,
+                    lastTokenSyncTime: Timestamp.now()
+                });
+
+                return { accountId: account.id, success: true };
+            } catch (error) {
+                console.error(`Error generating tokens for account ${account.id}:`, error);
+                return { accountId: account.id, success: false, error: error.message };
+            }
+        });
+
+        const results = await Promise.all(updatePromises);
+        res.json({ ok: true, results });
+    } catch (error) {
+        console.error('Error in generatePinterestTokens:', error);
+        res.status(500).json({ ok: false, error: error.message });
+    }
+}
+
 module.exports = {
-  publishContentHandler
+    publishContentHandler,
+    syncPinterestBoards,
+    generatePinterestTokens
 };
