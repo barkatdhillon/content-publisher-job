@@ -81,7 +81,7 @@ async function publishContentHandler({ db, storage }, req, res) {
                 upload: { accountId: account.id, ...result }
               };
             } else if (account.platform === 'Pinterest') {
-                const result = await publishToPinterest(post, account);
+                const result = await publishToPinterest(post, account, storage);
                 return {
                     account,
                     upload: { accountId: account.id, ...result }

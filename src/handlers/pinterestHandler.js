@@ -2,7 +2,7 @@ const axios = require('axios');
 const {setTimeout: sleep} = require("timers/promises");
 
 const pinterestAPIUrl = 'https://api.pinterest.com/v5';
-const redirectUrl = 'http://localhost:8080/auth/callback';
+const redirectUrl = 'https://content-publisher-8b3af.web.app/auth/callback';
 
 const mediaTypes = {'Image': 'image', 'Video': 'video', 'Reel': 'video', 'Carousel': 'carousel'}
 
@@ -62,29 +62,17 @@ async function refreshPinterestToken(account) {
     }
 }
 
-async function waitUntilFinished(creationId, accessToken, maxAttempts = 10) {
-    for (let i = 0; i < maxAttempts; i++) {
-        try {
-            const response = await axios.get(`${pinterestAPIUrl}/pins/${creationId}`, {
-                headers: {
-                    'Authorization': `Bearer ${accessToken}`
-                }
-            });
-            if (response.data && response.data.id) {
-                return true;
-            }
-        } catch (error) {
-            if (i === maxAttempts - 1) throw error;
-            await sleep(1000);
-        }
-    }
-    return true;
+function parseGsUrl(gsUrl) {
+    const parts = gsUrl.replace('gs://', '').split('/');
+    const bucketName = parts.shift(); // First part is the bucket
+    const objectKey = parts.join('/'); // Remaining parts are the path
+    return { bucketName, objectKey };
 }
 
-async function publishToPinterest(post, account) {
+async function publishToPinterest(post, account, storage) {
     const accessToken = account.accessToken;
     const mediaType = mediaTypes[post.type] || 'image';
-    const boardId = post.pinBoard[account.id].id;
+    const boardId = post.pinBoard[account.id].board;
 
     if (!accessToken || !boardId) {
         return {
@@ -112,7 +100,7 @@ async function publishToPinterest(post, account) {
                         url: post.media[0].signedUrl
                     },
                     description: post.caption || '',
-                    title: post.title || ''
+                    title: post.pinBoard[account.id].title || ''
                 };
                 const imageResponse = await axios.post(`${pinterestAPIUrl}/pins`, imagePayload, {
                     headers: {
@@ -123,40 +111,110 @@ async function publishToPinterest(post, account) {
                 break;
 
             case 'video':
-                const videoPayload = {
-                    board_id: boardId,
-                    media_source: {
-                        source_type: 'video_url',
-                        url: post.media[0].signedUrl
-                    },
-                    description: post.caption || '',
-                    title: post.title || ''
-                };
-                const videoResponse = await axios.post(`${pinterestAPIUrl}/pins`, videoPayload, {
-                    headers: {
-                        'Authorization': `Bearer ${accessToken}`
+                try {
+                    // --- 2. PARSE THE GS URL ---
+                    const { bucketName, objectKey } = parseGsUrl(post.media[0].gcsPath);
+                    console.log(`Targeting Bucket: ${bucketName}, Key: ${objectKey}`);
+
+                    // --- 3. REGISTER WITH PINTEREST ---
+                    console.log("Registering video with Pinterest...");
+                    const registerRes = await axios.post(
+                        `${pinterestAPIUrl}/media`,
+                        { media_type: 'video' },
+                        { headers: { 'Authorization': `Bearer ${accessToken}` } }
+                    );
+
+                    const { upload_url, upload_parameters, media_id } = registerRes.data;
+
+                    console.log("Downloading video from GCS to Buffer...");
+                    const [fileBuffer] = await storage.bucket(bucketName).file(objectKey).download();
+
+                    // 2. Convert Buffer to a Blob (Standard Web format)
+                    const { Blob } = require('buffer');
+                    const fileBlob = new Blob([fileBuffer], { type: 'video/mp4' });
+
+                    // 4. Use Native FormData (Standard in Node.js 18+)
+                    // No 'require' needed, it's a global variable now
+                    const form = new FormData();
+
+                    Object.keys(upload_parameters).forEach(key => {
+                        form.append(key, upload_parameters[key]);
+                    });
+
+                    // Append the Blob - standard FormData takes (key, value, filename)
+                    form.append('file', fileBlob, 'video.mp4');
+
+                    await axios.post(upload_url, form);
+
+                    // --- 5. POLL FOR SUCCESS (Better than a static timeout) ---
+                    console.log("Waiting for Pinterest to process the video...");
+                    let isReady = false;
+                    while (!isReady) {
+                        const statusRes = await axios.get(`${pinterestAPIUrl}/media/${media_id}`, {
+                            headers: { 'Authorization': `Bearer ${accessToken}` }
+                        });
+
+                        if (statusRes.data.status === 'succeeded') {
+                            isReady = true;
+                            console.log("Video processing complete!");
+                        } else if (statusRes.data.status === 'failed') {
+                            throw new Error("Pinterest video processing failed.");
+                        } else {
+                            console.log("Still processing... checking again in 5s");
+                            await new Promise(r => setTimeout(r, 5000));
+                        }
                     }
-                });
-                res.creation_id = videoResponse.data.id;
+
+                    // --- 6. CREATE THE PIN ---
+                    const pinRes = await axios.post(
+                        `${pinterestAPIUrl}/pins`,
+                        {
+                            board_id: boardId,
+                            title: post.pinBoard[account.id].title,
+                            description: post.caption,
+                            media_source: {
+                                source_type: "video_id",
+                                media_id: media_id,
+                                cover_image_key_frame_time: 1000
+                            }
+                        },
+                        { headers: { 'Authorization': `Bearer ${accessToken}` } }
+                    );
+
+                    console.log("Success! Pin Created ID:", pinRes.data.id);
+                    res.creation_id = pinRes.data.id;
+                } catch (error) {
+                    res.status = 'failed';
+                    res.message = error.response?.data || error.message;
+                    console.error("Workflow failed:", error.response?.data || error.message);
+                }
+
                 break;
 
             case 'carousel':
-                const carouselMediaSources = post.media.map(med => ({
-                    source_type: med.mediaType === 'Video' ? 'video_url' : 'image_url',
-                    url: med.signedUrl
+
+                // 3. Map the URLs into the required Pinterest "items" format
+                const carouselItems = post.media.map(med => ({
+                    url: med.signedUrl,
+                    title: post.pinBoard[account.id].title,
+                    description: post.caption
                 }));
 
-                const carouselPayload = {
+                const payload = {
+                    title: post.pinBoard[account.id].title,
+                    description: post.caption,
                     board_id: boardId,
-                    carousel_slots: carouselMediaSources.map(media => ({
-                        media_source: media
-                    })),
-                    description: post.caption || '',
-                    title: post.title || ''
+                    link: post.pinBoard[account.id].url,
+                    media_source: {
+                        source_type: "multiple_image_urls",
+                        items: carouselItems
+                    }
                 };
-                const carouselResponse = await axios.post(`${pinterestAPIUrl}/pins`, carouselPayload, {
+
+                const carouselResponse = await axios.post(`${pinterestAPIUrl}/pins`, payload, {
                     headers: {
-                        'Authorization': `Bearer ${accessToken}`
+                        'Authorization': `Bearer ${accessToken}`,
+                        'Content-Type': 'application/json'
                     }
                 });
                 res.creation_id = carouselResponse.data.id;
@@ -169,15 +227,18 @@ async function publishToPinterest(post, account) {
                 };
         }
 
-        // Wait for pin to be ready
-        await waitUntilFinished(res.creation_id, accessToken);
-
         return {status: 'Published', publish_id: res.creation_id};
     } catch (error) {
-        console.error(error);
+        console.error('Pinterest publish error:', {
+            postId: post && post.id,
+            postType: post && post.type,
+            mediaType,
+            boardId: post && post.pinBoard && post.pinBoard[account.id] && post.pinBoard[account.id].board
+        });
         let er = {};
         if (error.response) {
             console.error("Status:", error.response.status);
+            console.error("Response Data:", error.response.data);
             er = error.response.data;
         } else if (error.request) {
             console.error("No response received");

@@ -10,8 +10,9 @@
   },
   "dependencies": {
     "@google-cloud/storage": "^7.16.0",
+    "axios": "^1.6.0",
     "express": "^4.19.2",
     "firebase-admin": "^12.7.0",
-    "axios": "^1.6.0"
+    "form-data": "^4.0.5"
   }
 }
