@@ -3,7 +3,7 @@ const { setTimeout: sleep } = require("timers/promises");
 
 const instagramAPIUrl = 'https://graph.facebook.com/v24.0'
 
-const mediaTypes = {'Image': 'IMAGE', 'Video': 'VIDEO', 'Reel': 'REELS', 'Carousel': 'CAROUSEL'}
+const mediaTypes = {'Image': 'IMAGE', 'Video': 'REELS', 'Reel': 'REELS', 'Carousel': 'CAROUSEL'}
 
 async function waitUntilFinished(containerId, token, maxAttempts = 20) {
   let attempts = 0;
