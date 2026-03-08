@@ -39,25 +39,8 @@ async function waitUntilFinished(videoId, token, maxAttempts = 20) {
   throw new Error("Media processing timeout");
 }
 
-async function uploadPhoto(baseUrl, pageToken, imageUrl) {
-  const res = await axios.post(`${baseUrl}/photos`, {
-    url: imageUrl,
-    published: false,
-    temporary: true,
-    access_token: pageToken
-  });
+function getText(post){
 
-  return res.data.id;
-}
-
-async function uploadVideo(baseUrl, pageToken, videoUrl) {
-  const res = await axios.post(`${baseUrl}/videos`, {
-    file_url: videoUrl,
-    published: false,
-    access_token: pageToken
-  });
-
-  return res.data.id;
 }
 
 async function uploadToMyPage(baseUrl, pageAccessToken, post) {
@@ -77,7 +60,7 @@ async function uploadToMyPage(baseUrl, pageAccessToken, post) {
 
         // 2. Attach them to a Feed Post
         const postResponse = await axios.post(`${baseUrl}/feed`, {
-            message: post.caption || '',
+            message: post.postText,
             attached_media: mediaIds, // No JSON.stringify needed with Axios
             access_token: pageAccessToken
         });
@@ -95,6 +78,7 @@ async function publishToFacebook(post, account) {
   const baseUrl = `${facebookAPIUrl}/${account.ac_id}`;
   const accessToken = account.authorizationKey;
   const mediaType = mediaTypes[post.type] || 'IMAGE';
+  post.postText = `${post?.title || ''} ${post?.caption || ''}`.trim();
 
   if (!facebookAPIUrl || !accessToken) {
     return {
@@ -119,7 +103,7 @@ async function publishToFacebook(post, account) {
       case 'IMAGE':
         const imageResponse = await axios.post(baseUrl + '/photos', {
             url: post.media[0].signedUrl,
-            caption: post.caption || '',
+            caption: post.postText,
             access_token: pageAccessToken
           });
         res.creation_id = imageResponse.data.id;
@@ -128,7 +112,7 @@ async function publishToFacebook(post, account) {
       case 'VIDEO':
         const videoResponse = await axios.post(baseUrl + '/videos', {
             file_url: post.media[0].signedUrl,
-            description: post.caption || '',
+            description: post.postText,
             title: post.title || '',
             access_token: pageAccessToken
           });
@@ -165,7 +149,7 @@ async function publishToFacebook(post, account) {
               video_id: video_id,
               upload_phase: "finish",
               video_state: "PUBLISHED",
-              description: post.caption || ''
+              description: post.postText
             }
           }
         );

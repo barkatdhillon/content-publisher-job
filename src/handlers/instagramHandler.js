@@ -41,6 +41,7 @@ async function publishToInstagram(post, account) {
   const baseUrl = `${instagramAPIUrl}/${account.ac_id}`;
   const accessToken = account.authorizationKey;
   const mediaType = mediaTypes[post.type] || 'IMAGE';
+  post.postText = `${post?.title || ''} ${post?.caption || ''}`.trim();
 
   if (!instagramAPIUrl || !accessToken) {
     return {
@@ -61,7 +62,7 @@ async function publishToInstagram(post, account) {
       case 'IMAGE':
         const imageResponse = await axios.post(baseUrl + '/media', {
             image_url: post.media[0].signedUrl,
-            caption: post.caption || '',
+            caption: post.postText || '',
             media_type: mediaType,
             access_token: accessToken
           });
@@ -71,7 +72,7 @@ async function publishToInstagram(post, account) {
       case 'VIDEO':
         const videoResponse = await axios.post(baseUrl + '/media', {
             video_url: post.media[0].signedUrl,
-            caption: post.caption || '',
+            caption: post.postText || '',
             media_type: mediaType,
             access_token: accessToken
           });
@@ -81,7 +82,7 @@ async function publishToInstagram(post, account) {
       case 'REELS':
         const reelResponse = await axios.post(baseUrl + '/media', {
             video_url: post.media[0].signedUrl,
-            caption: post.caption || '',
+            caption: post.postText || '',
             media_type: mediaType,
             access_token: accessToken
           });
@@ -92,7 +93,7 @@ async function publishToInstagram(post, account) {
         const containerIds = [];
         for (const med of post.media) {
           const payload = {
-            caption: post.caption || '',
+            caption: post.postText || '',
             is_carousel_item: true,
             access_token: accessToken
           }
@@ -108,7 +109,7 @@ async function publishToInstagram(post, account) {
           containerIds.push(itemResponse.data.id);
         }
         const carouselResponse = await axios.post(baseUrl + '/media', {
-            caption: post.caption || '',
+            caption: post.postText || '',
             media_type: mediaType,
             children: containerIds,
             access_token: accessToken

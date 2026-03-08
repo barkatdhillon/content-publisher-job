@@ -100,7 +100,7 @@ async function publishToPinterest(post, account, storage) {
                         url: post.media[0].signedUrl
                     },
                     description: post.caption || '',
-                    title: post.pinBoard[account.id].title || ''
+                    title: post.title || ''
                 };
                 const imageResponse = await axios.post(`${pinterestAPIUrl}/pins`, imagePayload, {
                     headers: {
@@ -170,7 +170,7 @@ async function publishToPinterest(post, account, storage) {
                         `${pinterestAPIUrl}/pins`,
                         {
                             board_id: boardId,
-                            title: post.pinBoard[account.id].title,
+                            title: post.title,
                             description: post.caption,
                             media_source: {
                                 source_type: "video_id",
@@ -196,12 +196,12 @@ async function publishToPinterest(post, account, storage) {
                 // 3. Map the URLs into the required Pinterest "items" format
                 const carouselItems = post.media.map(med => ({
                     url: med.signedUrl,
-                    title: post.pinBoard[account.id].title,
+                    title: post.title,
                     description: post.caption
                 }));
 
                 const payload = {
-                    title: post.pinBoard[account.id].title,
+                    title: post.title,
                     description: post.caption,
                     board_id: boardId,
                     link: post.pinBoard[account.id].url,
