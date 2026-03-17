@@ -5,6 +5,12 @@ const instagramAPIUrl = 'https://graph.facebook.com/v24.0'
 
 const mediaTypes = {'Image': 'IMAGE', 'Video': 'REELS', 'Reel': 'REELS', 'Carousel': 'CAROUSEL'}
 
+function normalizeFirstComment(post) {
+  const raw = post && typeof post === 'object' ? post.firstComment : null;
+  if (typeof raw !== 'string') return '';
+  return raw.trim();
+}
+
 async function waitUntilFinished(containerId, token, maxAttempts = 20) {
   let attempts = 0;
 
@@ -42,6 +48,8 @@ async function publishToInstagram(post, account) {
   const accessToken = account.authorizationKey;
   const mediaType = mediaTypes[post.type] || 'IMAGE';
   post.postText = `${post?.title || ''} ${post?.caption || ''}`.trim();
+
+  const firstComment = normalizeFirstComment(post);
 
   if (!instagramAPIUrl || !accessToken) {
     return {
@@ -133,7 +141,22 @@ async function publishToInstagram(post, account) {
       }
     );
 
-    return {status: 'Published', publish_id: publishResponse.data.id}; 
+    const out = {status: 'Published', publish_id: publishResponse.data.id};
+
+    if (firstComment && out.publish_id) {
+      try {
+        const commentResponse = await axios.post(`${instagramAPIUrl}/${out.publish_id}/comments`, {
+          message: firstComment,
+          access_token: accessToken
+        });
+        out.first_comment_id = commentResponse.data && commentResponse.data.id;
+      } catch (commentErr) {
+        console.error('Failed to add first comment:', commentErr.response?.data || commentErr.message);
+        out.first_comment_error = commentErr.response?.data || commentErr.message;
+      }
+    }
+
+    return out; 
   } catch (error) {
     console.error(error);
     let er = {};

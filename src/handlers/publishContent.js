@@ -3,6 +3,7 @@ const { hydratePostUrls } = require('../services/postUrlHydration');
 const { uploadToInstagram } = require('./instagramHandler');
 const { uploadToFacebook } = require('./facebookHandler');
 const { publishToPinterest, fetchPinterestBoards, refreshPinterestToken, generatePinAccessTokens } = require('./pinterestHandler');
+const { publishToTikTok, refreshTikTokToken, generateTikTokAccessTokens } = require('./tiktokHandler');
 const { publishToYouTube } = require('./youtubeHandler')
 const { Timestamp } = require('firebase-admin/firestore');
 
@@ -89,6 +90,12 @@ async function publishContentHandler({ db, storage }, req, res) {
                 };
             } else if (account.platform === 'YouTube') {
                 const result = await publishToYouTube(post, account, storage);
+                return {
+                    account,
+                    upload: { accountId: account.id, ...result }
+                };
+            } else if (account.platform === 'TikTok') {
+                const result = await publishToTikTok(post, account, storage, db);
                 return {
                     account,
                     upload: { accountId: account.id, ...result }
@@ -230,8 +237,56 @@ async function generatePinterestTokens(db, req, res) {
     }
 }
 
+async function generateTikTokTokens(db, req, res) {
+    try {
+        // Get all Pinterest platform accounts with pinCode defined
+        const snapshot = await db.collection('platform_accounts')
+            .where('platform', '==', 'TikTok')
+            .get();
+
+        if (snapshot.empty) {
+            console.log('No TikTok accounts found');
+            return res.status(404).json({ ok: false, message: 'No TikTok accounts found' });
+        }
+
+        // Filter accounts that have pinCode defined (not null/undefined)
+        const tikTokAccounts = snapshot.docs
+            .map(doc => ({ id: doc.id, ...doc.data() }))
+            .filter(account => account.code != null);
+
+        if (tikTokAccounts.length === 0) {
+            console.log('No TikTok accounts with code found');
+            return res.status(404).json({ ok: false, message: 'No TikTok accounts with code found' });
+        }
+
+        // Generate tokens for each account
+        const updatePromises = tikTokAccounts.map(async (account) => {
+            try {
+                const tokens = await generateTikTokAccessTokens(account);
+                await db.collection('platform_accounts').doc(account.id).update({
+                    accessToken: tokens.access_token,
+                    refreshToken: tokens.refresh_token,
+                    lastTokenSyncTime: Timestamp.now()
+                });
+
+                return { accountId: account.id, success: true };
+            } catch (error) {
+                console.error(`Error generating tokens for account ${account.id}:`, error);
+                return { accountId: account.id, success: false, error: error.message };
+            }
+        });
+
+        const results = await Promise.all(updatePromises);
+        res.json({ ok: true, results });
+    } catch (error) {
+        console.error('Error in generateTikTokTokens:', error);
+        res.status(500).json({ ok: false, error: error.message });
+    }
+}
+
 module.exports = {
     publishContentHandler,
     syncPinterestBoards,
-    generatePinterestTokens
+    generatePinterestTokens,
+    generateTikTokTokens,
 };

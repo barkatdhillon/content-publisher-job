@@ -7,6 +7,12 @@ const facebookAPIUrl = 'https://graph.facebook.com/v24.0'
 
 const mediaTypes = {'Image': 'IMAGE', 'Video': 'VIDEO', 'Reel': 'REELS', 'Carousel': 'CAROUSEL'}
 
+function normalizeFirstComment(post) {
+  const raw = post && typeof post === 'object' ? post.firstComment : null;
+  if (typeof raw !== 'string') return '';
+  return raw.trim();
+}
+
 async function waitUntilFinished(videoId, token, maxAttempts = 20) {
   let attempts = 0;
 
@@ -99,6 +105,8 @@ async function publishToFacebook(post, account) {
     const tokenResponse = await axios.get(getPageTokenUrl);
     const pageAccessToken = tokenResponse.data.access_token;
 
+    const firstComment = normalizeFirstComment(post);
+
     switch(mediaType){
       case 'IMAGE':
         const imageResponse = await axios.post(baseUrl + '/photos', {
@@ -166,6 +174,19 @@ async function publishToFacebook(post, account) {
           ok: false,
           error: 'Invalid media type'
         };
+    }
+
+    if (firstComment && res.creation_id) {
+      try {
+        const commentResponse = await axios.post(`${facebookAPIUrl}/${res.creation_id}/comments`, {
+          message: firstComment,
+          access_token: pageAccessToken
+        });
+        res.first_comment_id = commentResponse.data && commentResponse.data.id;
+      } catch (commentErr) {
+        console.error('Failed to add first comment:', commentErr.response?.data || commentErr.message);
+        res.first_comment_error = commentErr.response?.data || commentErr.message;
+      }
     }
 
     return res;

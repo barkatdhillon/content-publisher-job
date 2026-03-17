@@ -1,6 +1,6 @@
 const express = require('express');
 const { initFirebase } = require('./config/firebase');
-const { publishContentHandler, syncPinterestBoards, generatePinterestTokens } = require('./handlers/publishContent');
+const { publishContentHandler, syncPinterestBoards, generatePinterestTokens, generateTikTokTokens} = require('./handlers/publishContent');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -19,6 +19,10 @@ app.get('/api/pinterest/sync-boards', async (req, res) => {
 
 app.get('/api/pinterest/generate-tokens', async (req, res) => {
   return generatePinterestTokens(db, req, res);
+});
+
+app.get('/api/tiktok/generate-tokens', async (req, res) => {
+  return generateTikTokTokens(db, req, res);
 });
 
 app.listen(port, () => {

@@ -1,64 +1,73 @@
 const axios = require('axios');
 const {setTimeout: sleep} = require("timers/promises");
+const {Timestamp} = require("firebase-admin/firestore");
 
-const pinterestAPIUrl = 'https://api.pinterest.com/v5';
-const redirectUrl = 'https://planner.naturalpoonam.com/callback/pinterest';
+const tiktokAPIUrl = 'https://open.tiktokapis.com/v2';
+const redirectUrl = 'https://planner.naturalpoonam.com/callback/tiktok';
 
-const mediaTypes = {'Image': 'image', 'Video': 'video', 'Reel': 'video', 'Carousel': 'carousel'}
+const mediaTypes = {'Image': 'carousel', 'Video': 'video', 'Reel': 'video', 'Carousel': 'carousel'}
 
 // https://www.pinterest.com/oauth/?client_id=1545991&redirect_uri=http://localhost:8080/auth/callback&response_type=code&scope=boards:read,pins:read
 
-async function generatePinAccessTokens(account) {
-    code = account.pinCode
-    const auth = Buffer.from(`${account.ac_id}:${account.pin_secret_key}`).toString('base64');
+async function generateTikTokAccessTokens(account) {
     try {
-        const response = await axios.post(`${pinterestAPIUrl}/oauth/token`,
+        const response = await axios.post(`${tiktokAPIUrl}/oauth/token/`,
             new URLSearchParams({
                 grant_type: 'authorization_code',
-                code: code,
+                client_key: account.clientKey,
+                client_secret: account.clientSecret,
+                code: account.code,
                 redirect_uri: redirectUrl,
             }),
             {
                 headers: {
-                    'Authorization': `Basic ${auth}`,
-                    'Content-Type': 'application/x-www-form-urlencoded'
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Cache-Control': 'no-cache'
                 }
             }
         );
+        if(response.data.error){
+            throw new Error(response.data.error_description);
+        }
         console.log(response.data)
         return response.data; // contains access_token and refresh_token
     } catch (error) {
-        if (error.response) {
-            // This will tell you if it's "invalid_grant" or "invalid_client"
-            console.error('Pinterest Error Data:', error.response.data);
-            console.error('Status:', error.response.status);
-        } else {
-            console.error('Error Message:', error.message);
-        }
+        // Log the specific error to see if it's still 'Janus' or something else
+        console.error("TikTok API Detail:", error.response?.data || error.message);
+        throw error;
     }
 }
 
-async function refreshPinterestToken(account) {
-    // Base64 encode your credentials for the Basic Auth header
-    const auth = Buffer.from(`${account.ac_id}:${account.pin_secret_key}`).toString('base64');
-
+async function refreshTikTokToken(account, db) {
     try {
-        const response = await axios.post(`${pinterestAPIUrl}/oauth/token`,
+        const response = await axios.post(`${tiktokAPIUrl}/oauth/token/`,
             new URLSearchParams({
                 grant_type: 'refresh_token',
+                client_key: account.clientKey,
+                client_secret: account.clientSecret,
                 refresh_token: account.refreshToken,
             }),
             {
                 headers: {
-                    'Authorization': `Basic ${auth}`,
                     'Content-Type': 'application/x-www-form-urlencoded',
-                },
+                    'Cache-Control': 'no-cache'
+                }
             }
         );
-        return response.data;
+        if(response.data.error){
+            throw new Error(response.data.error_description);
+        }
+        const tokens = response.data; // contains access_token and refresh_token
+        await db.collection('platform_accounts').doc(account.id).update({
+            accessToken: tokens.access_token,
+            refreshToken: tokens.refresh_token,
+            lastTokenSyncTime: Timestamp.now()
+        });
+        return tokens.access_token;
     } catch (error) {
-        console.error('Failed to refresh token:', error.response?.data || error.message);
-        throw new Error('Authentication expired. Please re-link your Pinterest account.');
+        // Log the specific error to see if it's still 'Janus' or something else
+        console.error("TikTok API Detail:", error.response?.data || error.message);
+        throw error;
     }
 }
 
@@ -69,15 +78,16 @@ function parseGsUrl(gsUrl) {
     return { bucketName, objectKey };
 }
 
-async function publishToPinterest(post, account, storage) {
-    const accessToken = account.accessToken;
-    const mediaType = mediaTypes[post.type] || 'image';
-    const boardId = post.pinBoard[account.id].board;
+async function publishToTikTok(post, account, storage, db) {
+    const accessToken = await refreshTikTokToken(account, db)
 
-    if (!accessToken || !boardId) {
+    const mediaType = mediaTypes[post.type] || 'video';
+    post.postText = `${post?.title || ''} ${post?.caption || ''}`.trim();
+
+    if (!accessToken) {
         return {
             ok: false,
-            error: 'Missing accessToken or pinterest_board_id'
+            error: 'Missing accessToken'
         };
     }
 
@@ -92,65 +102,65 @@ async function publishToPinterest(post, account, storage) {
         var res = {status: 'Uploading'};
 
         switch (mediaType) {
-            case 'image':
-                const imagePayload = {
-                    board_id: boardId,
-                    media_source: {
-                        source_type: 'image_url',
-                        url: post.media[0].signedUrl
-                    },
-                    description: post.caption || '',
-                    title: post.title || ''
-                };
-                const imageResponse = await axios.post(`${pinterestAPIUrl}/pins`, imagePayload, {
-                    headers: {
-                        'Authorization': `Bearer ${accessToken}`
-                    }
-                });
-                res.creation_id = imageResponse.data.id;
-                break;
 
             case 'video':
                 try {
+
                     // --- 2. PARSE THE GS URL ---
                     const { bucketName, objectKey } = parseGsUrl(post.media[0].gcsPath);
                     console.log(`Targeting Bucket: ${bucketName}, Key: ${objectKey}`);
 
+                    const bucket = storage.bucket(bucketName);
+                    const file = bucket.file(objectKey);
+
+                    // 1. Get File Metadata (Required for TikTok byte-range headers)
+                    const [metadata] = await file.getMetadata();
+                    const fileSize = parseInt(metadata.size);
+
                     // --- 3. REGISTER WITH PINTEREST ---
-                    console.log("Registering video with Pinterest...");
+                    console.log("Registering video with TikTok...");
                     const registerRes = await axios.post(
-                        `${pinterestAPIUrl}/media`,
-                        { media_type: 'video' },
-                        { headers: { 'Authorization': `Bearer ${accessToken}` } }
+                        `${tiktokAPIUrl}/post/publish/video/init/`,
+                        {
+                                // post_info: {
+                                //     title: post.postText,
+                                    // privacy_level: "SELF_ONLY", //"PUBLIC_TO_EVERYONE"
+                                // },
+                                source_info: {
+                                    source: "FILE_UPLOAD",
+                                    video_size: fileSize,
+                                    chunk_size: fileSize,
+                                    total_chunk_count: 1
+                                }
+                            },
+                        { headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
                     );
 
-                    const { upload_url, upload_parameters, media_id } = registerRes.data;
+                    const { upload_url, publish_id } = registerRes.data;
 
-                    console.log("Downloading video from GCS to Buffer...");
-                    const [fileBuffer] = await storage.bucket(bucketName).file(objectKey).download();
-
-                    // 2. Convert Buffer to a Blob (Standard Web format)
-                    const { Blob } = require('buffer');
-                    const fileBlob = new Blob([fileBuffer], { type: 'video/mp4' });
-
-                    // 4. Use Native FormData (Standard in Node.js 18+)
-                    // No 'require' needed, it's a global variable now
-                    const form = new FormData();
-
-                    Object.keys(upload_parameters).forEach(key => {
-                        form.append(key, upload_parameters[key]);
+                    // 3. Stream from GCS directly to TikTok (Step 2)
+                    // We use file.createReadStream() to stream the data without loading it into memory
+                    await axios({
+                        method: 'put',
+                        url: upload_url,
+                        data: file.createReadStream(),
+                        headers: {
+                            'Content-Type': 'video/mp4',
+                            'Content-Range': `bytes 0-${fileSize - 1}/${fileSize}`,
+                            'Content-Length': fileSize
+                        },
+                        maxBodyLength: Infinity,
+                        maxContentLength: Infinity
                     });
 
-                    // Append the Blob - standard FormData takes (key, value, filename)
-                    form.append('file', fileBlob, 'video.mp4');
-
-                    await axios.post(upload_url, form);
+                    console.log(`Successfully published ${objectKey}. ID: ${publish_id}`);
+                    return publish_id;
 
                     // --- 5. POLL FOR SUCCESS (Better than a static timeout) ---
                     console.log("Waiting for Pinterest to process the video...");
                     let isReady = false;
                     while (!isReady) {
-                        const statusRes = await axios.get(`${pinterestAPIUrl}/media/${media_id}`, {
+                        const statusRes = await axios.get(`${tiktokAPIUrl}/media/${media_id}`, {
                             headers: { 'Authorization': `Bearer ${accessToken}` }
                         });
 
@@ -167,7 +177,7 @@ async function publishToPinterest(post, account, storage) {
 
                     // --- 6. CREATE THE PIN ---
                     const pinRes = await axios.post(
-                        `${pinterestAPIUrl}/pins`,
+                        `${tiktokAPIUrl}/pins`,
                         {
                             board_id: boardId,
                             title: post.title,
@@ -184,9 +194,15 @@ async function publishToPinterest(post, account, storage) {
                     console.log("Success! Pin Created ID:", pinRes.data.id);
                     res.creation_id = pinRes.data.id;
                 } catch (error) {
+                    if (error.response) {
+                        // This will tell you if it's "scope_not_found" or "permission_denied"
+                        console.error("TikTok 403 Details:", JSON.stringify(error.response.data, null, 2));
+                    }
+
                     res.status = 'failed';
                     res.message = error.response?.data || error.message;
                     console.error("Workflow failed:", error.response?.data || error.message);
+                    throw error;
                 }
 
                 break;
@@ -211,7 +227,7 @@ async function publishToPinterest(post, account, storage) {
                     }
                 };
 
-                const carouselResponse = await axios.post(`${pinterestAPIUrl}/pins`, payload, {
+                const carouselResponse = await axios.post(`${tiktokAPIUrl}/pins`, payload, {
                     headers: {
                         'Authorization': `Bearer ${accessToken}`,
                         'Content-Type': 'application/json'
@@ -229,7 +245,7 @@ async function publishToPinterest(post, account, storage) {
 
         return {status: 'Published', publish_id: res.creation_id};
     } catch (error) {
-        console.error('Pinterest publish error:', {
+        console.error('TikTok publish error:', {
             postId: post && post.id,
             postType: post && post.type,
             mediaType,
@@ -251,32 +267,8 @@ async function publishToPinterest(post, account, storage) {
     }
 }
 
-async function fetchPinterestBoards(account) {
-
-    try {
-        const response = await axios.get(`${pinterestAPIUrl}/boards`, {
-            headers: {
-                'Authorization': `Bearer ${account.accessToken}`
-            },
-            params: {
-                page_size: 100
-            }
-        });
-
-        const boards = response.data.items || [];
-        return boards.map(board => ({
-            id: board.id,
-            name: board.name
-        }));
-    } catch (error) {
-        console.error('Error fetching Pinterest boards:', error);
-        throw error;
-    }
-}
-
 module.exports = {
-    publishToPinterest,
-    fetchPinterestBoards,
-    refreshPinterestToken,
-    generatePinAccessTokens
+    publishToTikTok,
+    refreshTikTokToken,
+    generateTikTokAccessTokens
 };
