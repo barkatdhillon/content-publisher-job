@@ -8,6 +8,44 @@ const {setTimeout: sleep} = require("timers/promises");
 
 const mediaTypes = {'Video': 'video', 'Reel': 'video'}
 
+function normalizeFirstComment(post) {
+    const raw = post && typeof post === 'object' ? post.firstComment : null;
+    if (typeof raw !== 'string') return '';
+    return raw.trim();
+}
+
+async function postAndBoostComment(videoId, commentText, oauth2Client) {
+    const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
+    try {
+        const threadResponse = await youtube.commentThreads.insert({
+            part: 'snippet',
+            requestBody: {
+                snippet: {
+                    videoId: videoId,
+                    topLevelComment: {
+                        snippet: {
+                            textOriginal: commentText
+                        }
+                    }
+                }
+            }
+        });
+
+        const commentId = threadResponse.data && threadResponse.data.snippet && threadResponse.data.snippet.topLevelComment
+            ? threadResponse.data.snippet.topLevelComment.id
+            : null;
+
+        if (commentId) {
+            await youtube.comments.setRating({ id: commentId, rating: 'like' });
+        }
+
+        return commentId;
+    } catch (error) {
+        console.error('❌ Error in YouTube Workaround:', error.response?.data || error.message);
+        return null;
+    }
+}
+
 /**
  * Fetches the secret value from the same Secret Manager
  * entries used by your Firebase Functions.
@@ -29,6 +67,8 @@ function parseGsUrl(gsUrl) {
 async function publishToYouTube(post, account, storage) {
     const refreshToken = account.refresh_token;
     const mediaType = mediaTypes[post.type]
+
+    const firstComment = normalizeFirstComment(post);
 
     if (!refreshToken || !mediaType) {
         return {
@@ -92,6 +132,13 @@ async function publishToYouTube(post, account, storage) {
                     });
                     console.log('Upload successful! Video ID:', response.data.id);
                     res.creation_id = response.data.id;
+
+                    if (firstComment && res.creation_id) {
+                        const commentId = await postAndBoostComment(res.creation_id, firstComment, oauth2Client);
+                        if (commentId) {
+                            res.first_comment_id = commentId;
+                        }
+                    }
                 } catch (error) {
                     return {
                         ok: false,
@@ -108,7 +155,11 @@ async function publishToYouTube(post, account, storage) {
                 };
         }
 
-        return {status: 'Published', publish_id: res.creation_id};
+        const out = {status: 'Published', publish_id: res.creation_id};
+        if (res.first_comment_id) {
+            out.first_comment_id = res.first_comment_id;
+        }
+        return out;
     } catch (error) {
         return {
             ok: false,
