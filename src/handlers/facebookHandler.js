@@ -43,6 +43,11 @@ async function uploadToMyPage(baseUrl, pageAccessToken, post) {
 }
 
 async function publishToFacebook(post, account) {
+
+    if (post && post.phones != null && Array.isArray(post.phones) && post.phones.length > 0) {
+        return {status: 'Published', note: 'This post is scheduled for phones'};
+    }
+
     const baseUrl = `${facebookAPIUrl}/${account.ac_id}`;
     const accessToken = account.authorizationKey;
     const mediaType = mediaTypes[post.type] || 'IMAGE';

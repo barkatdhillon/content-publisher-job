@@ -29,8 +29,7 @@ async function waitUntilFinished(containerId, token, maxAttempts = 30) {
 
         if (status === "FINISHED") {
             return true;
-        }
-        else if (status === "ERROR") {
+        } else if (status === "ERROR") {
             throw new Error(`Media processing failed: ${containerId}`);
         }
 
@@ -43,6 +42,10 @@ async function waitUntilFinished(containerId, token, maxAttempts = 30) {
 }
 
 async function publishToInstagram(post, account) {
+    if (post && post.phones != null && Array.isArray(post.phones) && post.phones.length > 0) {
+        return {status: 'Published', note: 'This post is scheduled for phones'};
+    }
+
     const baseUrl = `${instagramAPIUrl}/${account.ac_id}`;
     const accessToken = account.authorizationKey;
     const mediaType = mediaTypes[post.type] || 'IMAGE';
