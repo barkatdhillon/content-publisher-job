@@ -41,6 +41,34 @@ async function waitUntilFinished(containerId, token, maxAttempts = 30) {
     throw new Error("Media processing timeout");
 }
 
+async function uploadStory(baseUrl, accessToken, media) {
+    // 1. Detect media type based on file extension extension
+    const isVideo = media.mediaType === 'video';
+    console.log(`\n--- Starting Instagram Story Pipeline [Type: ${isVideo ? 'VIDEO' : 'IMAGE'}] ---`);
+
+    // ==========================================
+    // STEP 1: CREATE THE CONTAINER
+    // ==========================================
+    console.log('Step 1: Requesting item container initialization...');
+
+    // Base parameters required for all Instagram Stories
+    const containerParams = {
+        media_type: 'STORIES',
+        access_token: accessToken
+    };
+
+    // Instagram API separates payload assignment based on binary media profiles
+    if (isVideo) {
+        containerParams.video_url = media.signedUrl;
+    } else {
+        containerParams.image_url = media.signedUrl;
+    }
+
+    const initResponse = await axios.post(baseUrl + '/media', containerParams);
+
+    return initResponse.data.id;
+}
+
 async function publishToInstagram(post, account) {
     if (post && post.phones != null && Array.isArray(post.phones) && post.phones.length > 0) {
         return {status: 'Published', note: 'This post is scheduled for phones'};
@@ -128,33 +156,12 @@ async function publishToInstagram(post, account) {
                 break;
 
             case 'STORY':
-
-                // 1. Detect media type based on file extension extension
-                const isVideo = post.media[0].mediaType === 'video';
-                console.log(`\n--- Starting Instagram Story Pipeline [Type: ${isVideo ? 'VIDEO' : 'IMAGE'}] ---`);
-
-                // ==========================================
-                // STEP 1: CREATE THE CONTAINER
-                // ==========================================
-                console.log('Step 1: Requesting item container initialization...');
-
-                // Base parameters required for all Instagram Stories
-                const containerParams = {
-                    media_type: 'STORIES',
-                    access_token: accessToken
-                };
-
-                // Instagram API separates payload assignment based on binary media profiles
-                if (isVideo) {
-                    containerParams.video_url = post.media[0].signedUrl;
-                } else {
-                    containerParams.image_url = post.media[0].signedUrl;
+                let creation_id = []
+                for (const med of post.media) {
+                    const id = await uploadStory(baseUrl, accessToken, med)
+                    creation_id.push(id)
                 }
-
-                const initResponse = await axios.post(baseUrl + '/media', containerParams);
-
-                res.creation_id = initResponse.data.id;
-
+                res.creation_id = creation_id
                 break;
 
             default:
@@ -163,28 +170,43 @@ async function publishToInstagram(post, account) {
                     error: 'Invalid media type'
                 };
         }
-        // wait for container to be ready
-        await waitUntilFinished(res.creation_id, accessToken);
-
-        const publishResponse = await axios.post(baseUrl + `/media_publish`,
-            {
-                creation_id: res.creation_id,
-                access_token: accessToken
+        const out = {status: 'Published', publish_id: null};
+        if(mediaType === 'STORY') {
+            let publishIds = []
+            for(const creation_id of res.creation_id) {
+                // wait for container to be ready
+                await waitUntilFinished(creation_id, accessToken);
+                const publishResponse = await axios.post(baseUrl + `/media_publish`,
+                    {
+                        creation_id: creation_id,
+                        access_token: accessToken
+                    }
+                );
+                publishIds.push(publishResponse.data.id);
             }
-        );
-
-        const out = {status: 'Published', publish_id: publishResponse.data.id};
-
-        if (firstComment && out.publish_id) {
-            try {
-                const commentResponse = await axios.post(`${instagramAPIUrl}/${out.publish_id}/comments`, {
-                    message: firstComment,
+            out.publish_id = publishIds;
+        } else {
+            // wait for container to be ready
+            await waitUntilFinished(res.creation_id, accessToken);
+            const publishResponse = await axios.post(baseUrl + `/media_publish`,
+                {
+                    creation_id: res.creation_id,
                     access_token: accessToken
-                });
-                out.first_comment_id = commentResponse.data && commentResponse.data.id;
-            } catch (commentErr) {
-                console.error('Failed to add first comment:', commentErr.response?.data || commentErr.message);
-                out.first_comment_error = commentErr.response?.data || commentErr.message;
+                }
+            );
+
+            out.publish_id = publishResponse.data.id;
+            if (firstComment && out.publish_id) {
+                try {
+                    const commentResponse = await axios.post(`${instagramAPIUrl}/${out.publish_id}/comments`, {
+                        message: firstComment,
+                        access_token: accessToken
+                    });
+                    out.first_comment_id = commentResponse.data && commentResponse.data.id;
+                } catch (commentErr) {
+                    console.error('Failed to add first comment:', commentErr.response?.data || commentErr.message);
+                    out.first_comment_error = commentErr.response?.data || commentErr.message;
+                }
             }
         }
 

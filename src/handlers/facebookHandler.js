@@ -42,6 +42,78 @@ async function uploadToMyPage(baseUrl, pageAccessToken, post) {
     }
 }
 
+async function uploadStory(baseUrl, pageAccessToken, media){
+    let creation_id = "";
+    if (media && media.mediaType === "image") {
+        console.log('Step 1: Uploading un-published target photo to page asset library...');
+
+        // 1. Upload photo to the page with published=false parameter
+        const uploadRes = await axios.post(baseUrl + '/photos', {
+            url: media.signedUrl,
+            published: false,
+            access_token: pageAccessToken
+        });
+
+        const photoId = uploadRes.data.id;
+        console.log(`Photo uploaded. Asset Photo ID: ${photoId}`);
+
+        // 2. Attach the generated photo ID to a new Story element
+        console.log('Step 2: Committing photo asset into Page Stories...');
+        const storyRes = await axios.post(baseUrl + '/photo_stories', {
+            photo_id: photoId,
+            access_token: pageAccessToken
+        });
+
+        creation_id = storyRes.data.post_id;
+
+    } else if (media && media.mediaType === "video") {
+        console.log('Step 1: Requesting upload endpoint for remote URL ingestion...');
+
+        const initResponse = await axios.post(baseUrl + '/video_stories', {
+            upload_phase: 'start',
+            access_token: pageAccessToken,
+        });
+
+        // Meta returns a special "upload_url" endpoint alongside the video_id
+        const { video_id, upload_url } = initResponse.data;
+        console.log(`Initialized. Video ID: ${video_id}`);
+        console.log(`Target Processing Gateway: ${upload_url}`);
+
+        // ==========================================
+        // STEP 2: TRIGGER THE META DOWNLOAD INGESTION
+        // ==========================================
+        console.log('Step 2: Pushing cloud target pointer to Meta gateway...');
+
+        // We make an authorized POST call directly to the target upload_url,
+        // passing the public video address in the custom file_url header.
+        const ingestResponse = await axios.post(upload_url, {}, {
+            headers: {
+                'Authorization': `OAuth ${pageAccessToken}`,
+                'file_url': media.signedUrl
+            }
+        });
+
+        console.log('Meta ingestion agent acknowledged file stream:', ingestResponse.data);
+
+        // ==========================================
+        // STEP 3: IMMEDIATELY COMMIT/FINISH THE STORY
+        // ==========================================
+        // Crucial: For remote file urls via stories, don't stall in a polling loop!
+        // Tell Meta to commit the upload tracking ID right away.
+        console.log('Step 3: Registering complete chunk status and publishing...');
+
+        const finishResponse = await axios.post(baseUrl + '/video_stories', {
+            upload_phase: 'finish',
+            video_id: video_id, // Link the asset ID explicitly
+            access_token: pageAccessToken,
+        });
+
+        console.log('Success! Finalizing token registration on feed.', finishResponse.data);
+        creation_id = finishResponse.data.post_id;
+    }
+    return creation_id;
+}
+
 async function publishToFacebook(post, account) {
 
     if (post && post.phones != null && Array.isArray(post.phones) && post.phones.length > 0) {
@@ -137,73 +209,12 @@ async function publishToFacebook(post, account) {
                 break;
 
             case 'STORY':
-                if (post.media[0] && post.media[0].mediaType === "image") {
-                    console.log('Step 1: Uploading un-published target photo to page asset library...');
-
-                    // 1. Upload photo to the page with published=false parameter
-                    const uploadRes = await axios.post(baseUrl + '/photos', {
-                        url: post.media[0].signedUrl,
-                        published: false,
-                        access_token: pageAccessToken
-                    });
-
-                    const photoId = uploadRes.data.id;
-                    console.log(`Photo uploaded. Asset Photo ID: ${photoId}`);
-
-                    // 2. Attach the generated photo ID to a new Story element
-                    console.log('Step 2: Committing photo asset into Page Stories...');
-                    const storyRes = await axios.post(baseUrl + '/photo_stories', {
-                        photo_id: photoId,
-                        access_token: pageAccessToken
-                    });
-
-                    res.creation_id = storyRes.data.post_id;
-
-                } else if (post.media[0] && post.media[0].mediaType === "video") {
-                    console.log('Step 1: Requesting upload endpoint for remote URL ingestion...');
-
-                    const initResponse = await axios.post(baseUrl + '/video_stories', {
-                        upload_phase: 'start',
-                        access_token: pageAccessToken,
-                    });
-
-                    // Meta returns a special "upload_url" endpoint alongside the video_id
-                    const { video_id, upload_url } = initResponse.data;
-                    console.log(`Initialized. Video ID: ${video_id}`);
-                    console.log(`Target Processing Gateway: ${upload_url}`);
-
-                    // ==========================================
-                    // STEP 2: TRIGGER THE META DOWNLOAD INGESTION
-                    // ==========================================
-                    console.log('Step 2: Pushing cloud target pointer to Meta gateway...');
-
-                    // We make an authorized POST call directly to the target upload_url,
-                    // passing the public video address in the custom file_url header.
-                    const ingestResponse = await axios.post(upload_url, {}, {
-                        headers: {
-                            'Authorization': `OAuth ${pageAccessToken}`,
-                            'file_url': post.media[0].signedUrl
-                        }
-                    });
-
-                    console.log('Meta ingestion agent acknowledged file stream:', ingestResponse.data);
-
-                    // ==========================================
-                    // STEP 3: IMMEDIATELY COMMIT/FINISH THE STORY
-                    // ==========================================
-                    // Crucial: For remote file urls via stories, don't stall in a polling loop!
-                    // Tell Meta to commit the upload tracking ID right away.
-                    console.log('Step 3: Registering complete chunk status and publishing...');
-
-                    const finishResponse = await axios.post(baseUrl + '/video_stories', {
-                        upload_phase: 'finish',
-                        video_id: video_id, // Link the asset ID explicitly
-                        access_token: pageAccessToken,
-                    });
-
-                    console.log('Success! Finalizing token registration on feed.', finishResponse.data);
-                    res.creation_id = finishResponse.data.post_id;
+                let creation_id = []
+                for (const med of post.media) {
+                    const id = await uploadStory(baseUrl, pageAccessToken, med)
+                    creation_id.push(id)
                 }
+                res.creation_id = creation_id
                 break;
             default:
                 return {
