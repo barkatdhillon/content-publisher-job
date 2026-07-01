@@ -22,8 +22,13 @@ npm start
 - `POST /api/content/publish`
 
 ## Deploy to Cloud Run
-1. Build and deploy:
-
+1. Build the container image:
+2. 
 ```bash
 gcloud builds submit --tag gcr.io/content-publisher-8b3af/content-publisher-job
+```
+2. Deploy to Cloud run:
+
+```bash
 gcloud run deploy content-publisher-job --image gcr.io/content-publisher-8b3af/content-publisher-job --platform managed --region us-central1 --no-allow-unauthenticated
+```
