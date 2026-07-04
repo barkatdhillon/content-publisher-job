@@ -70,7 +70,7 @@ async function uploadStory(baseUrl, accessToken, media) {
 }
 
 async function publishToInstagram(post, account) {
-    if (post && post.phones != null && Array.isArray(post.phones) && post.phones.length > 0) {
+    if (account.publish_to_phone != null && account.publish_to_phone === true && post && post.phones != null && Array.isArray(post.phones) && post.phones.length > 0) {
         return {status: 'Published', note: 'This post is scheduled for phones'};
     }
 
