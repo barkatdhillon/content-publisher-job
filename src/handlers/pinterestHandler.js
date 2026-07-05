@@ -111,6 +111,8 @@ async function publishToPinterest(post, account, storage) {
                 break;
 
             case 'video':
+                let fileBuffer = null;
+                let fileBlob = null;
                 try {
                     // --- 2. PARSE THE GS URL ---
                     const { bucketName, objectKey } = parseGsUrl(post.media[0].gcsPath);
@@ -127,11 +129,11 @@ async function publishToPinterest(post, account, storage) {
                     const { upload_url, upload_parameters, media_id } = registerRes.data;
 
                     console.log("Downloading video from GCS to Buffer...");
-                    const [fileBuffer] = await storage.bucket(bucketName).file(objectKey).download();
+                    [fileBuffer] = await storage.bucket(bucketName).file(objectKey).download();
 
                     // 2. Convert Buffer to a Blob (Standard Web format)
                     const { Blob } = require('buffer');
-                    const fileBlob = new Blob([fileBuffer], { type: 'video/mp4' });
+                    fileBlob = new Blob([fileBuffer], { type: 'video/mp4' });
 
                     // 4. Use Native FormData (Standard in Node.js 18+)
                     // No 'require' needed, it's a global variable now
@@ -145,6 +147,10 @@ async function publishToPinterest(post, account, storage) {
                     form.append('file', fileBlob, 'video.mp4');
 
                     await axios.post(upload_url, form);
+
+                    // Clear buffer immediately after upload to free memory
+                    fileBuffer = null;
+                    fileBlob = null;
 
                     // --- 5. POLL FOR SUCCESS (Better than a static timeout) ---
                     console.log("Waiting for Pinterest to process the video...");
@@ -187,6 +193,10 @@ async function publishToPinterest(post, account, storage) {
                     res.status = 'failed';
                     res.message = error.response?.data || error.message;
                     console.error("Workflow failed:", error.response?.data || error.message);
+                } finally {
+                    // Ensure memory is freed even if errors occur
+                    fileBuffer = null;
+                    fileBlob = null;
                 }
 
                 break;

@@ -112,31 +112,38 @@ async function publishToYouTube(post, account, storage) {
 
                     console.log(`Starting upload for: ${fileName}`);
 
-                    // 3. Pipe to YouTube
-                    const response = await youtube.videos.insert({
-                        part: 'snippet,status',
-                        requestBody: {
-                            snippet: {
-                                title: post.title || 'New Upload',
-                                description: post.caption || 'Uploaded via Cloud Run',
-                                categoryId: '26', // How to and style
+                    try {
+                        // 3. Pipe to YouTube
+                        const response = await youtube.videos.insert({
+                            part: 'snippet,status',
+                            requestBody: {
+                                snippet: {
+                                    title: post.title || 'New Upload',
+                                    description: post.caption || 'Uploaded via Cloud Run',
+                                    categoryId: '26', // How to and style
+                                },
+                                status: {
+                                    privacyStatus: 'public', // Change to 'public' when ready
+                                    selfDeclaredMadeForKids: false,
+                                },
                             },
-                            status: {
-                                privacyStatus: 'public', // Change to 'public' when ready
-                                selfDeclaredMadeForKids: false,
+                            media: {
+                                body: videoStream,
                             },
-                        },
-                        media: {
-                            body: videoStream,
-                        },
-                    });
-                    console.log('Upload successful! Video ID:', response.data.id);
-                    res.creation_id = response.data.id;
+                        });
+                        console.log('Upload successful! Video ID:', response.data.id);
+                        res.creation_id = response.data.id;
 
-                    if (firstComment && res.creation_id) {
-                        const commentId = await postAndBoostComment(res.creation_id, firstComment, oauth2Client);
-                        if (commentId) {
-                            res.first_comment_id = commentId;
+                        if (firstComment && res.creation_id) {
+                            const commentId = await postAndBoostComment(res.creation_id, firstComment, oauth2Client);
+                            if (commentId) {
+                                res.first_comment_id = commentId;
+                            }
+                        }
+                    } finally {
+                        // Ensure stream is always destroyed to prevent memory leaks
+                        if (videoStream && !videoStream.destroyed) {
+                            videoStream.destroy();
                         }
                     }
                 } catch (error) {
