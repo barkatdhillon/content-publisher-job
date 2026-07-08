@@ -11,13 +11,15 @@ async function publishContentHandler({ db, storage }, req, res) {
   try {
     const ttlMs = 60 * 60 * 1000;
 
+    // Only query posts with 'Scheduled' status to prevent duplicate processing
+    // Posts marked as 'Publishing' or 'Published' will be excluded
     const statuses = parseCsvEnv('UPLOAD_STATUSES', ['Scheduled']);
     // Time range
     const now = new Date();
     // const istTime = new Date(
       // now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" })
     // );
-    const fifteenMinutesAgo = new Date(now.getTime() - 31 * 60 * 1000);
+    const fifteenMinutesAgo = new Date(now.getTime() - 16 * 60 * 1000);
 
     // Convert to Firestore Timestamp
     const nowTimestamp = Timestamp.fromDate(now);
@@ -63,6 +65,14 @@ async function publishContentHandler({ db, storage }, req, res) {
       return { ...post, accounts };
     });
 
+    // Immediately mark posts as 'Publishing' to prevent duplicate processing
+    const publishingUpdates = posts.map(post => {
+      const docRef = db.collection('posts').doc(post.id);
+      return docRef.update({ status: 'Publishing' });
+    });
+    await Promise.all(publishingUpdates);
+    console.log(`Marked ${posts.length} posts as 'Publishing'`);
+
     const postsWithUploads = await Promise.all(
       postsWithAccounts.map(async (post) => {
         const accounts = Array.isArray(post.accounts) ? post.accounts : [];
@@ -70,6 +80,14 @@ async function publishContentHandler({ db, storage }, req, res) {
         const accountUploadResults = await Promise.all(
           accounts.map(async (account) => {
             if (!account || typeof account !== 'object') return { account, upload: null };
+            
+            // IDEMPOTENCY CHECK: Skip if already published for this account
+            const existingStatus = post.platformStatuses && post.platformStatuses[account.id];
+            if (existingStatus && existingStatus.status === 'Published') {
+              console.log(`Skipping ${account.platform} account ${account.id} - already published`);
+              return { account, upload: existingStatus };
+            }
+            
             if (account.platform === 'Instagram') {
               const result = await uploadToInstagram(post, account);
               return {
@@ -123,17 +141,44 @@ async function publishContentHandler({ db, storage }, req, res) {
           nextPlatformStatuses[accountId] = { ...existing, ...upload };
         });
         delete post.accounts;
-        // update properties in db
+        
+        // Determine final status: 'Published' if all succeeded, 'Failed' if any failed
+        const allSucceeded = accountUploadResults.every(({ upload }) => 
+          upload && (upload.status === 'Published' || upload.status === 'Uploaded')
+        );
+        const finalStatus = allSucceeded ? 'Published' : 'Failed';
+        
+        // Use transaction for atomic update to prevent race conditions
         const docRef = db.collection("posts").doc(post.id);
-        // Update only the specific field
-        await docRef.update({
-          platformStatuses: nextPlatformStatuses,
-          status: 'Published'
-        });
+        try {
+          await db.runTransaction(async (transaction) => {
+            const doc = await transaction.get(docRef);
+            if (!doc.exists) {
+              throw new Error(`Post ${post.id} not found`);
+            }
+            
+            // Only update if status is still 'Publishing' (not already updated by another process)
+            const currentStatus = doc.data().status;
+            if (currentStatus === 'Publishing') {
+              transaction.update(docRef, {
+                platformStatuses: nextPlatformStatuses,
+                status: finalStatus,
+                lastUpdated: Timestamp.now()
+              });
+            } else {
+              console.log(`Post ${post.id} status changed to ${currentStatus} - skipping update`);
+            }
+          });
+          
+          console.log(`Updated post ${post.id} to status: ${finalStatus}`);
+        } catch (error) {
+          console.error(`Transaction failed for post ${post.id}:`, error);
+          // Revert to Scheduled on transaction failure
+          await docRef.update({ status: 'Scheduled' });
+          throw error;
+        }
 
-        console.log(`Updated post for id = ${post.id}`);
-
-        return { ...post, platformStatuses: nextPlatformStatuses };
+        return { ...post, platformStatuses: nextPlatformStatuses, status: finalStatus };
       })
     );
 
