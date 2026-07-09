@@ -95,6 +95,7 @@ async function publishToPinterest(post, account, storage) {
             case 'image':
                 const imagePayload = {
                     board_id: boardId,
+                    link: post.pinBoard[account.id].url,
                     media_source: {
                         source_type: 'image_url',
                         url: post.media[0].signedUrl
@@ -176,6 +177,7 @@ async function publishToPinterest(post, account, storage) {
                         `${pinterestAPIUrl}/pins`,
                         {
                             board_id: boardId,
+                            link: post.pinBoard[account.id].url,
                             title: post.title,
                             description: post.caption,
                             media_source: {
@@ -203,11 +205,9 @@ async function publishToPinterest(post, account, storage) {
 
             case 'carousel':
 
-                // 3. Map the URLs into the required Pinterest "items" format
-                const carouselItems = post.media.map(med => ({
-                    url: med.signedUrl,
-                    title: post.title,
-                    description: post.caption
+                // Pinterest carousels support a maximum of 5 images per pin
+                const carouselItems = post.media.slice(0, 5).map(med => ({
+                    url: med.signedUrl
                 }));
 
                 const payload = {
