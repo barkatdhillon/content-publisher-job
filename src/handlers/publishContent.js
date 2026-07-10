@@ -79,23 +79,33 @@ async function publishContentHandler({ db, storage }, req, res) {
             return { account, upload: existingStatus };
           }
 
+          let result;
           if (account.platform === 'Instagram') {
-            const result = await uploadToInstagram(post, account);
-            return { account, upload: { accountId: account.id, ...result } };
+            result = await uploadToInstagram(post, account);
           } else if (account.platform === 'Facebook') {
-            const result = await uploadToFacebook(post, account);
-            return { account, upload: { accountId: account.id, ...result } };
+            result = await uploadToFacebook(post, account);
           } else if (account.platform === 'Pinterest') {
-            const result = await publishToPinterest(post, account, storage);
-            return { account, upload: { accountId: account.id, ...result } };
+            result = await publishToPinterest(post, account, storage);
           } else if (account.platform === 'YouTube') {
-            const result = await publishToYouTube(post, account, storage);
-            return { account, upload: { accountId: account.id, ...result } };
+            result = await publishToYouTube(post, account, storage);
           } else if (account.platform === 'TikTok') {
-            const result = await publishToTikTok(post, account, storage, db);
-            return { account, upload: { accountId: account.id, ...result } };
+            result = await publishToTikTok(post, account, storage, db);
+          } else {
+            return { account, upload: null };
           }
-          return { account, upload: null };
+
+          const upload = { accountId: account.id, ...result };
+
+          // Persist this account's result immediately so a crash before the
+          // final status update below doesn't lose already-succeeded uploads
+          // and cause a retry to republish to this account.
+          try {
+            await docRef.update({ [`platformStatuses.${account.id}`]: upload });
+          } catch (error) {
+            console.error(`Failed to persist platform status for account ${account.id}:`, error);
+          }
+
+          return { account, upload };
         })
       );
 
