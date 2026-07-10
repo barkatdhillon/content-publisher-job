@@ -16,173 +16,141 @@ async function publishContentHandler({ db, storage }, req, res) {
     const statuses = parseCsvEnv('UPLOAD_STATUSES', ['Scheduled']);
     // Time range
     const now = new Date();
-    // const istTime = new Date(
-      // now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" })
-    // );
     const fifteenMinutesAgo = new Date(now.getTime() - 16 * 60 * 1000);
 
     // Convert to Firestore Timestamp
     const nowTimestamp = Timestamp.fromDate(now);
     const earlierTimestamp = Timestamp.fromDate(fifteenMinutesAgo);
 
-    let query = db.collection('posts');
-    query = applyStatusFilter(query, statuses);
-    query = query
-    .where('scheduledPublishTime', '>=', earlierTimestamp)
-    .where('scheduledPublishTime', '<=', nowTimestamp);
-    const snapshot = await query.get();
+    const processedPosts = [];
 
-    const posts = await Promise.all(
-      snapshot.docs.map(async (doc) => {
-        const data = doc.data();
-        const hydrated = await hydratePostUrls(storage, data, ttlMs);
-        return { id: doc.id, ...hydrated };
-      })
-    );
+    // Process one post at a time: claim it, publish it, then look for the
+    // next one. This lets any number of instances run this same query
+    // concurrently and naturally split the backlog, since a claimed post
+    // drops out of the 'Scheduled' query for everyone else. Stops once no
+    // posts remain.
+    while (true) {
+      let query = db.collection('posts');
+      query = applyStatusFilter(query, statuses);
+      query = query
+        .where('scheduledPublishTime', '>=', earlierTimestamp)
+        .where('scheduledPublishTime', '<=', nowTimestamp)
+        .limit(1);
+      const snapshot = await query.get();
 
-    const uniqueAccountIds = Array.from(
-      new Set(
-        posts
-          .flatMap((p) => (Array.isArray(p.accountIds) ? p.accountIds : []))
-          .filter((id) => typeof id === 'string' && id.trim().length > 0)
-      )
-    );
+      if (snapshot.empty) {
+        console.log('No more scheduled posts to publish');
+        break;
+      }
 
-    let accountById = new Map();
-    if (uniqueAccountIds.length > 0) {
-      const refs = uniqueAccountIds.map((id) => db.collection('platform_accounts').doc(id));
-      const snaps = await db.getAll(...refs);
-      snaps.forEach((snap) => {
-        if (snap.exists) {
-          accountById.set(snap.id, { id: snap.id, ...snap.data() });
-        }
+      const docRef = snapshot.docs[0].ref;
+
+      const claimedData = await db.runTransaction(async (transaction) => {
+        const fresh = await transaction.get(docRef);
+        if (!fresh.exists) return null;
+        if (!statuses.includes(fresh.data().status)) return null;
+        transaction.update(docRef, { status: 'Publishing' });
+        return fresh.data();
       });
+
+      if (!claimedData) {
+        // Another instance claimed this post between our query and our
+        // claim attempt - move on and look for the next available one.
+        continue;
+      }
+
+      const hydrated = await hydratePostUrls(storage, claimedData, ttlMs);
+      const post = { id: docRef.id, ...hydrated };
+
+      const accountIds = Array.isArray(post.accountIds) ? post.accountIds : [];
+      let accounts = [];
+      if (accountIds.length > 0) {
+        const refs = accountIds.map((id) => db.collection('platform_accounts').doc(id));
+        const snaps = await db.getAll(...refs);
+        accounts = snaps.filter((snap) => snap.exists).map((snap) => ({ id: snap.id, ...snap.data() }));
+      }
+
+      const accountUploadResults = await Promise.all(
+        accounts.map(async (account) => {
+          // IDEMPOTENCY CHECK: Skip if already published for this account
+          const existingStatus = post.platformStatuses && post.platformStatuses[account.id];
+          if (existingStatus && existingStatus.status === 'Published') {
+            console.log(`Skipping ${account.platform} account ${account.id} - already published`);
+            return { account, upload: existingStatus };
+          }
+
+          if (account.platform === 'Instagram') {
+            const result = await uploadToInstagram(post, account);
+            return { account, upload: { accountId: account.id, ...result } };
+          } else if (account.platform === 'Facebook') {
+            const result = await uploadToFacebook(post, account);
+            return { account, upload: { accountId: account.id, ...result } };
+          } else if (account.platform === 'Pinterest') {
+            const result = await publishToPinterest(post, account, storage);
+            return { account, upload: { accountId: account.id, ...result } };
+          } else if (account.platform === 'YouTube') {
+            const result = await publishToYouTube(post, account, storage);
+            return { account, upload: { accountId: account.id, ...result } };
+          } else if (account.platform === 'TikTok') {
+            const result = await publishToTikTok(post, account, storage, db);
+            return { account, upload: { accountId: account.id, ...result } };
+          }
+          return { account, upload: null };
+        })
+      );
+
+      const nextPlatformStatuses =
+        post.platformStatuses && typeof post.platformStatuses === 'object' ? { ...post.platformStatuses } : {};
+
+      accountUploadResults.forEach(({ upload }) => {
+        const accountId = upload && upload.accountId;
+        if (!accountId) return;
+        const existing =
+          nextPlatformStatuses[accountId] && typeof nextPlatformStatuses[accountId] === 'object'
+            ? nextPlatformStatuses[accountId]
+            : {};
+        nextPlatformStatuses[accountId] = { ...existing, ...upload };
+      });
+
+      // Determine final status: 'Published' if all succeeded, 'Failed' if any failed
+      const allSucceeded = accountUploadResults.every(({ upload }) =>
+        upload && (upload.status === 'Published' || upload.status === 'Uploaded')
+      );
+      const finalStatus = allSucceeded ? 'Published' : 'Failed';
+
+      // Use transaction for atomic update to prevent race conditions
+      try {
+        await db.runTransaction(async (transaction) => {
+          const doc = await transaction.get(docRef);
+          if (!doc.exists) {
+            throw new Error(`Post ${post.id} not found`);
+          }
+
+          // Only update if status is still 'Publishing' (not already updated by another process)
+          const currentStatus = doc.data().status;
+          if (currentStatus === 'Publishing') {
+            transaction.update(docRef, {
+              platformStatuses: nextPlatformStatuses,
+              status: finalStatus,
+              lastUpdated: Timestamp.now()
+            });
+          } else {
+            console.log(`Post ${post.id} status changed to ${currentStatus} - skipping update`);
+          }
+        });
+
+        console.log(`Updated post ${post.id} to status: ${finalStatus}`);
+      } catch (error) {
+        console.error(`Transaction failed for post ${post.id}:`, error);
+        // Revert to Scheduled on transaction failure
+        await docRef.update({ status: 'Scheduled' });
+        throw error;
+      }
+
+      processedPosts.push({ ...post, platformStatuses: nextPlatformStatuses, status: finalStatus });
     }
 
-    const postsWithAccounts = posts.map((post) => {
-      const accountIds = Array.isArray(post.accountIds) ? post.accountIds : [];
-      const accounts = accountIds.map((id) => accountById.get(id)).filter(Boolean);
-      return { ...post, accounts };
-    });
-
-    // Immediately mark posts as 'Publishing' to prevent duplicate processing
-    const publishingUpdates = posts.map(post => {
-      const docRef = db.collection('posts').doc(post.id);
-      return docRef.update({ status: 'Publishing' });
-    });
-    await Promise.all(publishingUpdates);
-    console.log(`Marked ${posts.length} posts as 'Publishing'`);
-
-    const postsWithUploads = await Promise.all(
-      postsWithAccounts.map(async (post) => {
-        const accounts = Array.isArray(post.accounts) ? post.accounts : [];
-
-        const accountUploadResults = await Promise.all(
-          accounts.map(async (account) => {
-            if (!account || typeof account !== 'object') return { account, upload: null };
-            
-            // IDEMPOTENCY CHECK: Skip if already published for this account
-            const existingStatus = post.platformStatuses && post.platformStatuses[account.id];
-            if (existingStatus && existingStatus.status === 'Published') {
-              console.log(`Skipping ${account.platform} account ${account.id} - already published`);
-              return { account, upload: existingStatus };
-            }
-            
-            if (account.platform === 'Instagram') {
-              const result = await uploadToInstagram(post, account);
-              return {
-                account,
-                upload: { accountId: account.id, ...result }
-              };
-            } else if (account.platform === 'Facebook') {
-              const result = await uploadToFacebook(post, account);
-              return {
-                account,
-                upload: { accountId: account.id, ...result }
-              };
-            } else if (account.platform === 'Pinterest') {
-                const result = await publishToPinterest(post, account, storage);
-                return {
-                    account,
-                    upload: { accountId: account.id, ...result }
-                };
-            } else if (account.platform === 'YouTube') {
-                const result = await publishToYouTube(post, account, storage);
-                return {
-                    account,
-                    upload: { accountId: account.id, ...result }
-                };
-            } else if (account.platform === 'TikTok') {
-                const result = await publishToTikTok(post, account, storage, db);
-                return {
-                    account,
-                    upload: { accountId: account.id, ...result }
-                };
-            }
-            return { account, upload: null };
-          })
-        );
-
-        const nextAccounts = accountUploadResults.map(({ account, upload }) => {
-          if (!upload) return account;
-          return { ...account, upload };
-        });
-
-        const nextPlatformStatuses =
-          post.platformStatuses && typeof post.platformStatuses === 'object' ? { ...post.platformStatuses } : {};
-
-        accountUploadResults.forEach(({ upload }) => {
-          const accountId = upload && upload.accountId;
-          if (!accountId) return;
-          const existing =
-            nextPlatformStatuses[accountId] && typeof nextPlatformStatuses[accountId] === 'object'
-              ? nextPlatformStatuses[accountId]
-              : {};
-          nextPlatformStatuses[accountId] = { ...existing, ...upload };
-        });
-        delete post.accounts;
-        
-        // Determine final status: 'Published' if all succeeded, 'Failed' if any failed
-        const allSucceeded = accountUploadResults.every(({ upload }) => 
-          upload && (upload.status === 'Published' || upload.status === 'Uploaded')
-        );
-        const finalStatus = allSucceeded ? 'Published' : 'Failed';
-        
-        // Use transaction for atomic update to prevent race conditions
-        const docRef = db.collection("posts").doc(post.id);
-        try {
-          await db.runTransaction(async (transaction) => {
-            const doc = await transaction.get(docRef);
-            if (!doc.exists) {
-              throw new Error(`Post ${post.id} not found`);
-            }
-            
-            // Only update if status is still 'Publishing' (not already updated by another process)
-            const currentStatus = doc.data().status;
-            if (currentStatus === 'Publishing') {
-              transaction.update(docRef, {
-                platformStatuses: nextPlatformStatuses,
-                status: finalStatus,
-                lastUpdated: Timestamp.now()
-              });
-            } else {
-              console.log(`Post ${post.id} status changed to ${currentStatus} - skipping update`);
-            }
-          });
-          
-          console.log(`Updated post ${post.id} to status: ${finalStatus}`);
-        } catch (error) {
-          console.error(`Transaction failed for post ${post.id}:`, error);
-          // Revert to Scheduled on transaction failure
-          await docRef.update({ status: 'Scheduled' });
-          throw error;
-        }
-
-        return { ...post, platformStatuses: nextPlatformStatuses, status: finalStatus };
-      })
-    );
-
-    res.json({ count: postsWithUploads.length, posts: postsWithUploads });
+    res.json({ count: processedPosts.length, posts: processedPosts });
   } catch (err) {
     res.status(500).json({ error: 'Internal error', details: String(err && err.message ? err.message : err) });
   }
