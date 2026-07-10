@@ -1,5 +1,8 @@
 const axios = require('axios');
 const {setTimeout: sleep} = require("timers/promises");
+const { createLogger } = require('../utils/logger');
+
+const log = createLogger('InstagramHandler');
 
 const instagramAPIUrl = 'https://graph.facebook.com/v24.0'
 
@@ -204,7 +207,7 @@ async function publishToInstagram(post, account) {
                     });
                     out.first_comment_id = commentResponse.data && commentResponse.data.id;
                 } catch (commentErr) {
-                    console.error('Failed to add first comment:', commentErr.response?.data || commentErr.message);
+                    log.error('Failed to add first comment', { postId: post.id, accountId: account.id }, commentErr);
                     out.first_comment_error = commentErr.response?.data || commentErr.message;
                 }
             }
@@ -212,20 +215,18 @@ async function publishToInstagram(post, account) {
 
         return out;
     } catch (error) {
-        console.error(error);
+        const context = { postId: post && post.id, accountId: account && account.id, mediaType };
         let er = {};
         if (error.response) {
             // Server responded with status 4xx/5xx
-            console.error("Status:", error.response.status);
+            log.error('Instagram publish error - API response', context, error);
             er = error.response.data;
-
         } else if (error.request) {
             // No response received
-            console.error("No response received");
-            er = error.request
+            log.error('Instagram publish error - no response received', context, error);
+            er = 'No response received from Instagram';
         } else {
-            // Something else
-            console.error("Error:", error.message);
+            log.error('Instagram publish error', context, error);
             er = error.message;
         }
         return {status: 'Failed', error: er};

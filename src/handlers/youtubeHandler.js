@@ -5,6 +5,9 @@ const { Storage } = require('@google-cloud/storage');
 const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
 const secretClient = new SecretManagerServiceClient();
 const {setTimeout: sleep} = require("timers/promises");
+const { createLogger } = require('../utils/logger');
+
+const log = createLogger('YouTubeHandler');
 
 const mediaTypes = {'Video': 'video', 'Reel': 'video'}
 
@@ -41,7 +44,7 @@ async function postAndBoostComment(videoId, commentText, oauth2Client) {
 
         return commentId;
     } catch (error) {
-        console.error('❌ Error in YouTube Workaround:', error.response?.data || error.message);
+        log.error('Failed to post/boost first comment', { videoId }, error);
         return null;
     }
 }
@@ -94,7 +97,7 @@ async function publishToYouTube(post, account, storage) {
                     const { bucketName, fileName} = parseGsUrl(post.media[0].gcsPath);
 
                     if (!bucketName || !fileName) {
-                        return res.status(400).send('Missing bucketName or fileName');
+                        return { ok: false, error: 'Missing bucketName or fileName' };
                     }
 
                     // 1. Load Credentials from Secrets
@@ -110,7 +113,7 @@ async function publishToYouTube(post, account, storage) {
                     const gcsFile = storage.bucket(bucketName).file(fileName);
                     const videoStream = gcsFile.createReadStream();
 
-                    console.log(`Starting upload for: ${fileName}`);
+                    log.info('Starting YouTube upload', { postId: post.id, accountId: account.id, fileName });
 
                     try {
                         // 3. Pipe to YouTube
@@ -131,7 +134,7 @@ async function publishToYouTube(post, account, storage) {
                                 body: videoStream,
                             },
                         });
-                        console.log('Upload successful! Video ID:', response.data.id);
+                        log.info('YouTube upload successful', { postId: post.id, videoId: response.data.id });
                         res.creation_id = response.data.id;
 
                         if (firstComment && res.creation_id) {
@@ -147,9 +150,10 @@ async function publishToYouTube(post, account, storage) {
                         }
                     }
                 } catch (error) {
+                    log.error('YouTube video upload failed', { postId: post.id, accountId: account.id }, error);
                     return {
                         ok: false,
-                        error: error.message
+                        error: error.response?.data || error.message
                     };
                 }
 
@@ -168,9 +172,10 @@ async function publishToYouTube(post, account, storage) {
         }
         return out;
     } catch (error) {
+        log.error('publishToYouTube failed', { postId: post && post.id, accountId: account && account.id }, error);
         return {
             ok: false,
-            error: error.message
+            error: error.response?.data || error.message
         };
     }
 }

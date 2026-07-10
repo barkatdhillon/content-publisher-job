@@ -1,6 +1,9 @@
 const axios = require('axios');
 const FormData = require('form-data');
 const {setTimeout: sleep} = require("timers/promises");
+const { createLogger } = require('../utils/logger');
+
+const log = createLogger('PinterestHandler');
 
 const pinterestAPIUrl = 'https://api.pinterest.com/v5';
 const redirectUrl = 'https://planner.naturalpoonam.com/callback/pinterest';
@@ -26,16 +29,10 @@ async function generatePinAccessTokens(account) {
                 }
             }
         );
-        console.log(response.data)
+        log.info('Generated Pinterest access tokens', { accountId: account.id });
         return response.data; // contains access_token and refresh_token
     } catch (error) {
-        if (error.response) {
-            // This will tell you if it's "invalid_grant" or "invalid_client"
-            console.error('Pinterest Error Data:', error.response.data);
-            console.error('Status:', error.response.status);
-        } else {
-            console.error('Error Message:', error.message);
-        }
+        log.error('Failed to generate Pinterest access tokens', { accountId: account.id }, error);
     }
 }
 
@@ -58,7 +55,7 @@ async function refreshPinterestToken(account) {
         );
         return response.data;
     } catch (error) {
-        console.error('Failed to refresh token:', error.response?.data || error.message);
+        log.error('Failed to refresh Pinterest token', { accountId: account.id }, error);
         throw new Error('Authentication expired. Please re-link your Pinterest account.');
     }
 }
@@ -116,10 +113,9 @@ async function publishToPinterest(post, account, storage) {
                 try {
                     // --- 2. PARSE THE GS URL ---
                     const { bucketName, objectKey } = parseGsUrl(post.media[0].gcsPath);
-                    console.log(`Targeting Bucket: ${bucketName}, Key: ${objectKey}`);
+                    log.info('Targeting GCS object for Pinterest video upload', { postId: post.id, bucketName, objectKey });
 
                     // --- 3. REGISTER WITH PINTEREST ---
-                    console.log("Registering video with Pinterest...");
                     const registerRes = await axios.post(
                         `${pinterestAPIUrl}/media`,
                         { media_type: 'video' },
@@ -135,7 +131,7 @@ async function publishToPinterest(post, account, storage) {
                     const [metadata] = await file.getMetadata();
                     const fileSize = parseInt(metadata.size, 10);
 
-                    console.log("Streaming video from GCS to Pinterest...");
+                    log.info('Streaming video from GCS to Pinterest', { postId: post.id, mediaId: media_id, fileSize });
                     const form = new FormData();
 
                     Object.keys(upload_parameters).forEach(key => {
@@ -154,7 +150,6 @@ async function publishToPinterest(post, account, storage) {
                     });
 
                     // --- 5. POLL FOR SUCCESS (Better than a static timeout) ---
-                    console.log("Waiting for Pinterest to process the video...");
                     let isReady = false;
                     while (!isReady) {
                         const statusRes = await axios.get(`${pinterestAPIUrl}/media/${media_id}`, {
@@ -163,11 +158,10 @@ async function publishToPinterest(post, account, storage) {
 
                         if (statusRes.data.status === 'succeeded') {
                             isReady = true;
-                            console.log("Video processing complete!");
+                            log.info('Pinterest video processing complete', { postId: post.id, mediaId: media_id });
                         } else if (statusRes.data.status === 'failed') {
                             throw new Error("Pinterest video processing failed.");
                         } else {
-                            console.log("Still processing... checking again in 5s");
                             await new Promise(r => setTimeout(r, 5000));
                         }
                     }
@@ -189,12 +183,12 @@ async function publishToPinterest(post, account, storage) {
                         { headers: { 'Authorization': `Bearer ${accessToken}` } }
                     );
 
-                    console.log("Success! Pin Created ID:", pinRes.data.id);
+                    log.info('Pinterest video pin created', { postId: post.id, pinId: pinRes.data.id });
                     res.creation_id = pinRes.data.id;
                 } catch (error) {
                     res.status = 'failed';
                     res.message = error.response?.data || error.message;
-                    console.error("Workflow failed:", error.response?.data || error.message);
+                    log.error('Pinterest video workflow failed', { postId: post.id, accountId: account.id }, error);
                 }
 
                 break;
@@ -233,24 +227,32 @@ async function publishToPinterest(post, account, storage) {
                 };
         }
 
+        // The video case's inner try/catch swallows its own errors (to log
+        // detailed context) and signals failure via res.status instead of
+        // throwing - without this check, a failed video upload would fall
+        // through and be reported as 'Published' with no publish_id.
+        if (res.status === 'failed') {
+            return { status: 'Failed', error: res.message };
+        }
+
         return {status: 'Published', publish_id: res.creation_id};
     } catch (error) {
-        console.error('Pinterest publish error:', {
+        const context = {
             postId: post && post.id,
             postType: post && post.type,
+            accountId: account && account.id,
             mediaType,
             boardId: post && post.pinBoard && post.pinBoard[account.id] && post.pinBoard[account.id].board
-        });
+        };
         let er = {};
         if (error.response) {
-            console.error("Status:", error.response.status);
-            console.error("Response Data:", error.response.data);
+            log.error('Pinterest publish error - API response', context, error);
             er = error.response.data;
         } else if (error.request) {
-            console.error("No response received");
-            er = error.request;
+            log.error('Pinterest publish error - no response received', context, error);
+            er = 'No response received from Pinterest';
         } else {
-            console.error("Error:", error.message);
+            log.error('Pinterest publish error', context, error);
             er = error.message;
         }
         return {status: 'Failed', error: er};
@@ -275,7 +277,7 @@ async function fetchPinterestBoards(account) {
             name: board.name
         }));
     } catch (error) {
-        console.error('Error fetching Pinterest boards:', error);
+        log.error('Error fetching Pinterest boards', { accountId: account.id }, error);
         throw error;
     }
 }

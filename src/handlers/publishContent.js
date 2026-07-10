@@ -1,11 +1,14 @@
 const { parseCsvEnv, applyStatusFilter } = require('../utils/firestoreFilters');
 const { hydratePostUrls } = require('../services/postUrlHydration');
+const { createLogger } = require('../utils/logger');
 const { uploadToInstagram } = require('./instagramHandler');
 const { uploadToFacebook } = require('./facebookHandler');
 const { publishToPinterest, fetchPinterestBoards, refreshPinterestToken, generatePinAccessTokens } = require('./pinterestHandler');
 const { publishToTikTok, refreshTikTokToken, generateTikTokAccessTokens } = require('./tiktokHandler');
 const { publishToYouTube } = require('./youtubeHandler')
 const { Timestamp } = require('firebase-admin/firestore');
+
+const log = createLogger('publishContent');
 
 async function publishContentHandler({ db, storage }, req, res) {
   try {
@@ -39,7 +42,7 @@ async function publishContentHandler({ db, storage }, req, res) {
       const snapshot = await query.get();
 
       if (snapshot.empty) {
-        console.log('No more scheduled posts to publish');
+        log.info('No more scheduled posts to publish');
         break;
       }
 
@@ -59,8 +62,15 @@ async function publishContentHandler({ db, storage }, req, res) {
         continue;
       }
 
-      const hydrated = await hydratePostUrls(storage, claimedData, ttlMs);
-      const post = { id: docRef.id, ...hydrated };
+      let post;
+      try {
+        const hydrated = await hydratePostUrls(storage, claimedData, ttlMs);
+        post = { id: docRef.id, ...hydrated };
+      } catch (error) {
+        log.error('Failed to hydrate media URLs for post', { postId: docRef.id }, error);
+        await docRef.update({ status: 'Scheduled' });
+        throw error;
+      }
 
       const accountIds = Array.isArray(post.accountIds) ? post.accountIds : [];
       let accounts = [];
@@ -72,26 +82,33 @@ async function publishContentHandler({ db, storage }, req, res) {
 
       const accountUploadResults = await Promise.all(
         accounts.map(async (account) => {
+          const logContext = { postId: post.id, accountId: account.id, platform: account.platform };
+
           // IDEMPOTENCY CHECK: Skip if already published for this account
           const existingStatus = post.platformStatuses && post.platformStatuses[account.id];
           if (existingStatus && existingStatus.status === 'Published') {
-            console.log(`Skipping ${account.platform} account ${account.id} - already published`);
+            log.info('Skipping account - already published', logContext);
             return { account, upload: existingStatus };
           }
 
           let result;
-          if (account.platform === 'Instagram') {
-            result = await uploadToInstagram(post, account);
-          } else if (account.platform === 'Facebook') {
-            result = await uploadToFacebook(post, account);
-          } else if (account.platform === 'Pinterest') {
-            result = await publishToPinterest(post, account, storage);
-          } else if (account.platform === 'YouTube') {
-            result = await publishToYouTube(post, account, storage);
-          } else if (account.platform === 'TikTok') {
-            result = await publishToTikTok(post, account, storage, db);
-          } else {
-            return { account, upload: null };
+          try {
+            if (account.platform === 'Instagram') {
+              result = await uploadToInstagram(post, account);
+            } else if (account.platform === 'Facebook') {
+              result = await uploadToFacebook(post, account);
+            } else if (account.platform === 'Pinterest') {
+              result = await publishToPinterest(post, account, storage);
+            } else if (account.platform === 'YouTube') {
+              result = await publishToYouTube(post, account, storage);
+            } else if (account.platform === 'TikTok') {
+              result = await publishToTikTok(post, account, storage, db);
+            } else {
+              return { account, upload: null };
+            }
+          } catch (error) {
+            log.error('Platform upload threw unexpectedly', logContext, error);
+            result = { status: 'Failed', error: error.message };
           }
 
           const upload = { accountId: account.id, ...result };
@@ -102,7 +119,7 @@ async function publishContentHandler({ db, storage }, req, res) {
           try {
             await docRef.update({ [`platformStatuses.${account.id}`]: upload });
           } catch (error) {
-            console.error(`Failed to persist platform status for account ${account.id}:`, error);
+            log.error('Failed to persist platform status for account', logContext, error);
           }
 
           return { account, upload };
@@ -145,13 +162,13 @@ async function publishContentHandler({ db, storage }, req, res) {
               lastUpdated: Timestamp.now()
             });
           } else {
-            console.log(`Post ${post.id} status changed to ${currentStatus} - skipping update`);
+            log.info('Post status changed by another process - skipping update', { postId: post.id, currentStatus });
           }
         });
 
-        console.log(`Updated post ${post.id} to status: ${finalStatus}`);
+        log.info('Updated post status', { postId: post.id, finalStatus });
       } catch (error) {
-        console.error(`Transaction failed for post ${post.id}:`, error);
+        log.error('Final status transaction failed for post', { postId: post.id }, error);
         // Revert to Scheduled on transaction failure
         await docRef.update({ status: 'Scheduled' });
         throw error;
@@ -162,6 +179,7 @@ async function publishContentHandler({ db, storage }, req, res) {
 
     res.json({ count: processedPosts.length, posts: processedPosts });
   } catch (err) {
+    log.error('publishContentHandler failed', {}, err);
     res.status(500).json({ error: 'Internal error', details: String(err && err.message ? err.message : err) });
   }
 }
@@ -174,7 +192,7 @@ async function syncPinterestBoards(db, req, res) {
             .get();
 
         if (snapshot.empty) {
-            console.log('No Pinterest accounts found');
+            log.info('No Pinterest accounts found');
             return res.status(404).json({ ok: false, message: 'No Pinterest accounts found' });
         }
 
@@ -200,7 +218,7 @@ async function syncPinterestBoards(db, req, res) {
 
                 return { accountId: account.id, success: true, boardsCount: boards.length };
             } catch (error) {
-                console.error(`Error syncing boards for account ${account.id}:`, error);
+                log.error('Error syncing boards for account', { accountId: account.id }, error);
                 return { accountId: account.id, success: false, error: error.message };
             }
         });
@@ -208,7 +226,7 @@ async function syncPinterestBoards(db, req, res) {
         const results = await Promise.all(updatePromises);
         res.json({ ok: true, results });
     } catch (error) {
-        console.error('Error in syncPinterestBoards:', error);
+        log.error('Error in syncPinterestBoards', {}, error);
         res.status(500).json({ ok: false, error: error.message });
     }
 }
@@ -221,7 +239,7 @@ async function generatePinterestTokens(db, req, res) {
             .get();
 
         if (snapshot.empty) {
-            console.log('No Pinterest accounts found');
+            log.info('No Pinterest accounts found');
             return res.status(404).json({ ok: false, message: 'No Pinterest accounts found' });
         }
 
@@ -231,7 +249,7 @@ async function generatePinterestTokens(db, req, res) {
             .filter(account => account.pinCode != null);
 
         if (pinterestAccounts.length === 0) {
-            console.log('No Pinterest accounts with pinCode found');
+            log.info('No Pinterest accounts with pinCode found');
             return res.status(404).json({ ok: false, message: 'No Pinterest accounts with pinCode found' });
         }
 
@@ -247,7 +265,7 @@ async function generatePinterestTokens(db, req, res) {
 
                 return { accountId: account.id, success: true };
             } catch (error) {
-                console.error(`Error generating tokens for account ${account.id}:`, error);
+                log.error('Error generating tokens for account', { accountId: account.id }, error);
                 return { accountId: account.id, success: false, error: error.message };
             }
         });
@@ -255,7 +273,7 @@ async function generatePinterestTokens(db, req, res) {
         const results = await Promise.all(updatePromises);
         res.json({ ok: true, results });
     } catch (error) {
-        console.error('Error in generatePinterestTokens:', error);
+        log.error('Error in generatePinterestTokens', {}, error);
         res.status(500).json({ ok: false, error: error.message });
     }
 }
@@ -268,7 +286,7 @@ async function generateTikTokTokens(db, req, res) {
             .get();
 
         if (snapshot.empty) {
-            console.log('No TikTok accounts found');
+            log.info('No TikTok accounts found');
             return res.status(404).json({ ok: false, message: 'No TikTok accounts found' });
         }
 
@@ -278,7 +296,7 @@ async function generateTikTokTokens(db, req, res) {
             .filter(account => account.code != null);
 
         if (tikTokAccounts.length === 0) {
-            console.log('No TikTok accounts with code found');
+            log.info('No TikTok accounts with code found');
             return res.status(404).json({ ok: false, message: 'No TikTok accounts with code found' });
         }
 
@@ -294,7 +312,7 @@ async function generateTikTokTokens(db, req, res) {
 
                 return { accountId: account.id, success: true };
             } catch (error) {
-                console.error(`Error generating tokens for account ${account.id}:`, error);
+                log.error('Error generating tokens for account', { accountId: account.id }, error);
                 return { accountId: account.id, success: false, error: error.message };
             }
         });
@@ -302,7 +320,7 @@ async function generateTikTokTokens(db, req, res) {
         const results = await Promise.all(updatePromises);
         res.json({ ok: true, results });
     } catch (error) {
-        console.error('Error in generateTikTokTokens:', error);
+        log.error('Error in generateTikTokTokens', {}, error);
         res.status(500).json({ ok: false, error: error.message });
     }
 }

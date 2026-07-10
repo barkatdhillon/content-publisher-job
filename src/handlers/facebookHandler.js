@@ -1,5 +1,8 @@
 const axios = require('axios');
 const {setTimeout: sleep} = require("timers/promises");
+const { createLogger } = require('../utils/logger');
+
+const log = createLogger('FacebookHandler');
 
 const facebookAPIUrl = 'https://graph.facebook.com/v24.0'
 
@@ -37,7 +40,7 @@ async function uploadToMyPage(baseUrl, pageAccessToken, post) {
         return postResponse.data.id;
     } catch (err) {
         // This will print the EXACT reason it fails (e.g. missing scope)
-        console.error("Failed:", err.response?.data || err.message);
+        log.error('uploadToMyPage failed', {}, err);
         throw err;
     }
 }
@@ -231,27 +234,25 @@ async function publishToFacebook(post, account) {
                 });
                 res.first_comment_id = commentResponse.data && commentResponse.data.id;
             } catch (commentErr) {
-                console.error('Failed to add first comment:', commentErr.response?.data || commentErr.message);
+                log.error('Failed to add first comment', { postId: post.id, accountId: account.id }, commentErr);
                 res.first_comment_error = commentErr.response?.data || commentErr.message;
             }
         }
 
         return res;
     } catch (error) {
-        console.error(error);
+        const context = { postId: post && post.id, accountId: account && account.id, mediaType };
         let er = {};
         if (error.response) {
             // Server responded with status 4xx/5xx
-            console.error("Status:", error.response.status);
+            log.error('Facebook publish error - API response', context, error);
             er = error.response.data;
-
         } else if (error.request) {
             // No response received
-            console.error("No response received");
-            er = error.request
+            log.error('Facebook publish error - no response received', context, error);
+            er = 'No response received from Facebook';
         } else {
-            // Something else
-            console.error("Error:", error.message);
+            log.error('Facebook publish error', context, error);
             er = error.message;
         }
         return {status: 'Failed', error: er};

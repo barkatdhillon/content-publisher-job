@@ -1,6 +1,9 @@
 const axios = require('axios');
 const {setTimeout: sleep} = require("timers/promises");
 const {Timestamp} = require("firebase-admin/firestore");
+const { createLogger } = require('../utils/logger');
+
+const log = createLogger('TikTokHandler');
 
 const tiktokAPIUrl = 'https://open.tiktokapis.com/v2';
 const redirectUrl = 'https://planner.naturalpoonam.com/callback/tiktok';
@@ -29,11 +32,11 @@ async function generateTikTokAccessTokens(account) {
         if(response.data.error){
             throw new Error(response.data.error_description);
         }
-        console.log(response.data)
+        log.info('Generated TikTok access tokens', { accountId: account.id });
         return response.data; // contains access_token and refresh_token
     } catch (error) {
         // Log the specific error to see if it's still 'Janus' or something else
-        console.error("TikTok API Detail:", error.response?.data || error.message);
+        log.error('Failed to generate TikTok access tokens', { accountId: account.id }, error);
         throw error;
     }
 }
@@ -66,7 +69,7 @@ async function refreshTikTokToken(account, db) {
         return tokens.access_token;
     } catch (error) {
         // Log the specific error to see if it's still 'Janus' or something else
-        console.error("TikTok API Detail:", error.response?.data || error.message);
+        log.error('Failed to refresh TikTok token', { accountId: account.id }, error);
         throw error;
     }
 }
@@ -108,7 +111,7 @@ async function publishToTikTok(post, account, storage, db) {
 
                     // --- 2. PARSE THE GS URL ---
                     const { bucketName, objectKey } = parseGsUrl(post.media[0].gcsPath);
-                    console.log(`Targeting Bucket: ${bucketName}, Key: ${objectKey}`);
+                    log.info('Targeting GCS object for TikTok video upload', { postId: post.id, bucketName, objectKey });
 
                     const bucket = storage.bucket(bucketName);
                     const file = bucket.file(objectKey);
@@ -117,15 +120,10 @@ async function publishToTikTok(post, account, storage, db) {
                     const [metadata] = await file.getMetadata();
                     const fileSize = parseInt(metadata.size);
 
-                    // --- 3. REGISTER WITH PINTEREST ---
-                    console.log("Registering video with TikTok...");
+                    // --- 3. REGISTER WITH TIKTOK ---
                     const registerRes = await axios.post(
                         `${tiktokAPIUrl}/post/publish/video/init/`,
                         {
-                                // post_info: {
-                                //     title: post.postText,
-                                    // privacy_level: "SELF_ONLY", //"PUBLIC_TO_EVERYONE"
-                                // },
                                 source_info: {
                                     source: "FILE_UPLOAD",
                                     video_size: fileSize,
@@ -153,87 +151,21 @@ async function publishToTikTok(post, account, storage, db) {
                         maxContentLength: Infinity
                     });
 
-                    console.log(`Successfully published ${objectKey}. ID: ${publish_id}`);
-                    return publish_id;
-
-                    // --- 5. POLL FOR SUCCESS (Better than a static timeout) ---
-                    console.log("Waiting for Pinterest to process the video...");
-                    let isReady = false;
-                    while (!isReady) {
-                        const statusRes = await axios.get(`${tiktokAPIUrl}/media/${media_id}`, {
-                            headers: { 'Authorization': `Bearer ${accessToken}` }
-                        });
-
-                        if (statusRes.data.status === 'succeeded') {
-                            isReady = true;
-                            console.log("Video processing complete!");
-                        } else if (statusRes.data.status === 'failed') {
-                            throw new Error("Pinterest video processing failed.");
-                        } else {
-                            console.log("Still processing... checking again in 5s");
-                            await new Promise(r => setTimeout(r, 5000));
-                        }
-                    }
-
-                    // --- 6. CREATE THE PIN ---
-                    const pinRes = await axios.post(
-                        `${tiktokAPIUrl}/pins`,
-                        {
-                            board_id: boardId,
-                            title: post.title,
-                            description: post.caption,
-                            media_source: {
-                                source_type: "video_id",
-                                media_id: media_id,
-                                cover_image_key_frame_time: 1000
-                            }
-                        },
-                        { headers: { 'Authorization': `Bearer ${accessToken}` } }
-                    );
-
-                    console.log("Success! Pin Created ID:", pinRes.data.id);
-                    res.creation_id = pinRes.data.id;
+                    log.info('TikTok video published', { postId: post.id, publishId: publish_id });
+                    res.creation_id = publish_id;
                 } catch (error) {
                     if (error.response) {
                         // This will tell you if it's "scope_not_found" or "permission_denied"
-                        console.error("TikTok 403 Details:", JSON.stringify(error.response.data, null, 2));
+                        log.error('TikTok video workflow failed - API response', { postId: post.id, accountId: account.id }, error);
+                    } else {
+                        log.error('TikTok video workflow failed', { postId: post.id, accountId: account.id }, error);
                     }
 
                     res.status = 'failed';
                     res.message = error.response?.data || error.message;
-                    console.error("Workflow failed:", error.response?.data || error.message);
                     throw error;
                 }
 
-                break;
-
-            case 'carousel':
-
-                // 3. Map the URLs into the required Pinterest "items" format
-                const carouselItems = post.media.map(med => ({
-                    url: med.signedUrl,
-                    title: post.title,
-                    description: post.caption
-                }));
-
-                const payload = {
-                    title: post.title,
-                    description: post.caption,
-                    board_id: boardId,
-                    link: post.pinBoard[account.id].url,
-                    media_source: {
-                        source_type: "multiple_image_urls",
-                        items: carouselItems
-                    }
-                };
-
-                const carouselResponse = await axios.post(`${tiktokAPIUrl}/pins`, payload, {
-                    headers: {
-                        'Authorization': `Bearer ${accessToken}`,
-                        'Content-Type': 'application/json'
-                    }
-                });
-                res.creation_id = carouselResponse.data.id;
                 break;
 
             default:
@@ -245,22 +177,16 @@ async function publishToTikTok(post, account, storage, db) {
 
         return {status: 'Published', publish_id: res.creation_id};
     } catch (error) {
-        console.error('TikTok publish error:', {
-            postId: post && post.id,
-            postType: post && post.type,
-            mediaType,
-            boardId: post && post.pinBoard && post.pinBoard[account.id] && post.pinBoard[account.id].board
-        });
+        const context = { postId: post && post.id, postType: post && post.type, accountId: account && account.id, mediaType };
         let er = {};
         if (error.response) {
-            console.error("Status:", error.response.status);
-            console.error("Response Data:", error.response.data);
+            log.error('TikTok publish error - API response', context, error);
             er = error.response.data;
         } else if (error.request) {
-            console.error("No response received");
-            er = error.request;
+            log.error('TikTok publish error - no response received', context, error);
+            er = 'No response received from TikTok';
         } else {
-            console.error("Error:", error.message);
+            log.error('TikTok publish error', context, error);
             er = error.message;
         }
         return {status: 'Failed', error: er};
