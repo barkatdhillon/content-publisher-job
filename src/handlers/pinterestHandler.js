@@ -1,4 +1,5 @@
 const axios = require('axios');
+const FormData = require('form-data');
 const {setTimeout: sleep} = require("timers/promises");
 
 const pinterestAPIUrl = 'https://api.pinterest.com/v5';
@@ -112,8 +113,6 @@ async function publishToPinterest(post, account, storage) {
                 break;
 
             case 'video':
-                let fileBuffer = null;
-                let fileBlob = null;
                 try {
                     // --- 2. PARSE THE GS URL ---
                     const { bucketName, objectKey } = parseGsUrl(post.media[0].gcsPath);
@@ -129,29 +128,30 @@ async function publishToPinterest(post, account, storage) {
 
                     const { upload_url, upload_parameters, media_id } = registerRes.data;
 
-                    console.log("Downloading video from GCS to Buffer...");
-                    [fileBuffer] = await storage.bucket(bucketName).file(objectKey).download();
+                    // Pinterest's upload_url is a standard S3 presigned-POST endpoint,
+                    // so we can stream the file straight from GCS instead of buffering
+                    // the whole video in memory.
+                    const file = storage.bucket(bucketName).file(objectKey);
+                    const [metadata] = await file.getMetadata();
+                    const fileSize = parseInt(metadata.size, 10);
 
-                    // 2. Convert Buffer to a Blob (Standard Web format)
-                    const { Blob } = require('buffer');
-                    fileBlob = new Blob([fileBuffer], { type: 'video/mp4' });
-
-                    // 4. Use Native FormData (Standard in Node.js 18+)
-                    // No 'require' needed, it's a global variable now
+                    console.log("Streaming video from GCS to Pinterest...");
                     const form = new FormData();
 
                     Object.keys(upload_parameters).forEach(key => {
                         form.append(key, upload_parameters[key]);
                     });
 
-                    // Append the Blob - standard FormData takes (key, value, filename)
-                    form.append('file', fileBlob, 'video.mp4');
+                    form.append('file', file.createReadStream(), { filename: 'video.mp4', knownLength: fileSize });
 
-                    await axios.post(upload_url, form);
-
-                    // Clear buffer immediately after upload to free memory
-                    fileBuffer = null;
-                    fileBlob = null;
+                    await axios.post(upload_url, form, {
+                        headers: {
+                            ...form.getHeaders(),
+                            'Content-Length': form.getLengthSync()
+                        },
+                        maxBodyLength: Infinity,
+                        maxContentLength: Infinity
+                    });
 
                     // --- 5. POLL FOR SUCCESS (Better than a static timeout) ---
                     console.log("Waiting for Pinterest to process the video...");
@@ -195,10 +195,6 @@ async function publishToPinterest(post, account, storage) {
                     res.status = 'failed';
                     res.message = error.response?.data || error.message;
                     console.error("Workflow failed:", error.response?.data || error.message);
-                } finally {
-                    // Ensure memory is freed even if errors occur
-                    fileBuffer = null;
-                    fileBlob = null;
                 }
 
                 break;
