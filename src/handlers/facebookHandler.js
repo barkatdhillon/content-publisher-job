@@ -181,7 +181,7 @@ async function publishToFacebook(post, account) {
                     }
                 );
                 const {video_id, upload_url} = startRes.data;
-                console.log("Upload session started:", video_id);
+                log.info('Facebook reel upload session started', { postId: post.id, videoId: video_id });
 
                 const uploadRes = await axios.post(upload_url, null, {
                     headers: {
@@ -190,7 +190,7 @@ async function publishToFacebook(post, account) {
                     }
                 });
 
-                console.log("Video uploaded successfully", uploadRes);
+                log.info('Facebook reel video uploaded', { postId: post.id, videoId: video_id, status: uploadRes.status });
 
                 const reelResponse = await axios.post(`${baseUrl}/video_reels`, null,
                     {
@@ -203,7 +203,7 @@ async function publishToFacebook(post, account) {
                         }
                     }
                 );
-                console.log("Reel created:", reelResponse);
+                log.info('Facebook reel created', { postId: post.id, videoId: video_id, data: reelResponse.data });
                 res.creation_id = video_id;
                 break;
 
