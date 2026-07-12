@@ -44,6 +44,31 @@ async function waitUntilFinished(containerId, token, maxAttempts = 30) {
     throw new Error("Media processing timeout");
 }
 
+// Meta's containers can report status_code "FINISHED" slightly before the
+// backend is actually ready to accept /media_publish - most common with
+// carousels. Retry a few times on that specific transient error before
+// giving up.
+async function publishMedia(baseUrl, creationId, accessToken, maxAttempts = 4) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            const publishResponse = await axios.post(baseUrl + `/media_publish`, {
+                creation_id: creationId,
+                access_token: accessToken
+            });
+            return publishResponse.data.id;
+        } catch (error) {
+            const subcode = error.response?.data?.error?.error_subcode;
+            const notReadyYet = subcode === 2207027;
+            if (notReadyYet && attempt < maxAttempts) {
+                console.log(`Media ${creationId} not ready to publish yet, retrying (${attempt}/${maxAttempts})...`);
+                await sleep(5000);
+                continue;
+            }
+            throw error;
+        }
+    }
+}
+
 async function uploadStory(baseUrl, accessToken, media) {
     // 1. Detect media type based on file extension extension
     const isVideo = media.mediaType === 'video';
@@ -179,26 +204,14 @@ async function publishToInstagram(post, account) {
             for(const creation_id of res.creation_id) {
                 // wait for container to be ready
                 await waitUntilFinished(creation_id, accessToken);
-                const publishResponse = await axios.post(baseUrl + `/media_publish`,
-                    {
-                        creation_id: creation_id,
-                        access_token: accessToken
-                    }
-                );
-                publishIds.push(publishResponse.data.id);
+                const publishId = await publishMedia(baseUrl, creation_id, accessToken);
+                publishIds.push(publishId);
             }
             out.publish_id = publishIds;
         } else {
             // wait for container to be ready
             await waitUntilFinished(res.creation_id, accessToken);
-            const publishResponse = await axios.post(baseUrl + `/media_publish`,
-                {
-                    creation_id: res.creation_id,
-                    access_token: accessToken
-                }
-            );
-
-            out.publish_id = publishResponse.data.id;
+            out.publish_id = await publishMedia(baseUrl, res.creation_id, accessToken);
             if (firstComment && out.publish_id) {
                 try {
                     const commentResponse = await axios.post(`${instagramAPIUrl}/${out.publish_id}/comments`, {
