@@ -18,6 +18,25 @@ function isAiGenerated(post) {
     return !!(post && post.isAiGenerated === true);
 }
 
+// Graph API can transiently return a 200 with no access_token field (e.g.
+// under momentary rate limiting). An unchecked empty token then gets sent
+// on downstream calls (like /photo_stories), which Meta reports back as a
+// generic "(#100) Missing Permission" - indistinguishable from a real scope
+// issue. Retry the exchange a few times and fail loudly instead.
+async function getPageAccessToken(baseUrl, accessToken, maxAttempts = 3) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const tokenResponse = await axios.get(`${baseUrl}?fields=access_token&access_token=${accessToken}`);
+        const pageAccessToken = tokenResponse.data && tokenResponse.data.access_token;
+        if (pageAccessToken) {
+            return pageAccessToken;
+        }
+        if (attempt < maxAttempts) {
+            await sleep(2000);
+        }
+    }
+    throw new Error('Failed to obtain a valid Facebook Page access token after retries');
+}
+
 // 'EXPLICIT' is Meta's provenance_type for third-party self-disclosure, as
 // opposed to the EXPLICIT_* values reserved for Meta's own in-app AI tools.
 function provenanceInfo() {
@@ -162,9 +181,7 @@ async function publishToFacebook(post, account) {
     }
     try {
         var res = {status: 'Published'}
-        const getPageTokenUrl = `${baseUrl}?fields=access_token&access_token=${accessToken}`;
-        const tokenResponse = await axios.get(getPageTokenUrl);
-        const pageAccessToken = tokenResponse.data.access_token;
+        const pageAccessToken = await getPageAccessToken(baseUrl, accessToken);
 
         const firstComment = normalizeFirstComment(post);
         const aiGenerated = isAiGenerated(post);

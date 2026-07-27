@@ -21,6 +21,14 @@ function isAiGenerated(post) {
     return !!(post && post.isAiGenerated === true);
 }
 
+// YouTube rejects '<' and '>' in snippet.title/description (400 invalidTitle
+// / invalidDescription, e.g. from emoticons like "<3" or stray HTML) and
+// enforces title <= 100 chars and description <= 5000 chars.
+function sanitizeYoutubeText(text, maxLength) {
+    if (typeof text !== 'string') return '';
+    return text.replace(/[<>]/g, '').slice(0, maxLength);
+}
+
 async function postAndBoostComment(videoId, commentText, oauth2Client) {
     const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
     try {
@@ -125,8 +133,8 @@ async function publishToYouTube(post, account, storage) {
                             part: 'snippet,status',
                             requestBody: {
                                 snippet: {
-                                    title: post.title || 'New Upload',
-                                    description: post.caption || 'Uploaded via Cloud Run',
+                                    title: sanitizeYoutubeText(post.title, 100) || 'New Upload',
+                                    description: sanitizeYoutubeText(post.caption, 5000) || 'Uploaded via Cloud Run',
                                     categoryId: '26', // How to and style
                                 },
                                 status: {
