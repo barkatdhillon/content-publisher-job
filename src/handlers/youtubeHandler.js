@@ -17,6 +17,10 @@ function normalizeFirstComment(post) {
     return raw.trim();
 }
 
+function isAiGenerated(post) {
+    return !!(post && post.isAiGenerated === true);
+}
+
 async function postAndBoostComment(videoId, commentText, oauth2Client) {
     const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
     try {
@@ -128,6 +132,7 @@ async function publishToYouTube(post, account, storage) {
                                 status: {
                                     privacyStatus: 'public', // Change to 'public' when ready
                                     selfDeclaredMadeForKids: false,
+                                    containsSyntheticMedia: isAiGenerated(post),
                                 },
                             },
                             media: {

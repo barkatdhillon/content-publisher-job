@@ -14,6 +14,10 @@ function normalizeFirstComment(post) {
     return raw.trim();
 }
 
+function isAiGenerated(post) {
+    return !!(post && post.isAiGenerated === true);
+}
+
 async function waitUntilFinished(containerId, token, maxAttempts = 30) {
     let attempts = 0;
 
@@ -69,7 +73,7 @@ async function publishMedia(baseUrl, creationId, accessToken, maxAttempts = 4) {
     }
 }
 
-async function uploadStory(baseUrl, accessToken, media) {
+async function uploadStory(baseUrl, accessToken, media, aiGenerated) {
     // 1. Detect media type based on file extension extension
     const isVideo = media.mediaType === 'video';
     console.log(`\n--- Starting Instagram Story Pipeline [Type: ${isVideo ? 'VIDEO' : 'IMAGE'}] ---`);
@@ -82,7 +86,8 @@ async function uploadStory(baseUrl, accessToken, media) {
     // Base parameters required for all Instagram Stories
     const containerParams = {
         media_type: 'STORIES',
-        access_token: accessToken
+        access_token: accessToken,
+        is_ai_generated: aiGenerated
     };
 
     // Instagram API separates payload assignment based on binary media profiles
@@ -124,13 +129,15 @@ async function publishToInstagram(post, account) {
     }
     try {
         var res = {status: 'Uploaded'}
+        const aiGenerated = isAiGenerated(post);
         switch (mediaType) {
             case 'IMAGE':
                 const imageResponse = await axios.post(baseUrl + '/media', {
                     image_url: post.media[0].signedUrl,
                     caption: post.postText || '',
                     media_type: mediaType,
-                    access_token: accessToken
+                    access_token: accessToken,
+                    is_ai_generated: aiGenerated
                 });
                 res.creation_id = imageResponse.data.id;
                 break;
@@ -140,7 +147,8 @@ async function publishToInstagram(post, account) {
                     video_url: post.media[0].signedUrl,
                     caption: post.postText || '',
                     media_type: mediaType,
-                    access_token: accessToken
+                    access_token: accessToken,
+                    is_ai_generated: aiGenerated
                 });
                 res.creation_id = videoResponse.data.id;
                 break;
@@ -150,7 +158,8 @@ async function publishToInstagram(post, account) {
                     video_url: post.media[0].signedUrl,
                     caption: post.postText || '',
                     media_type: mediaType,
-                    access_token: accessToken
+                    access_token: accessToken,
+                    is_ai_generated: aiGenerated
                 });
                 res.creation_id = reelResponse.data.id;
                 break;
@@ -178,7 +187,8 @@ async function publishToInstagram(post, account) {
                     caption: post.postText || '',
                     media_type: mediaType,
                     children: containerIds,
-                    access_token: accessToken
+                    access_token: accessToken,
+                    is_ai_generated: aiGenerated
                 });
                 res.creation_id = carouselResponse.data.id;
                 break;
@@ -186,7 +196,7 @@ async function publishToInstagram(post, account) {
             case 'STORY':
                 let creation_id = []
                 for (const med of post.media) {
-                    const id = await uploadStory(baseUrl, accessToken, med)
+                    const id = await uploadStory(baseUrl, accessToken, med, aiGenerated)
                     creation_id.push(id)
                 }
                 res.creation_id = creation_id
