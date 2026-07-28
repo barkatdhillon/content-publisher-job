@@ -1,7 +1,7 @@
 const express = require('express');
 const { initFirebase } = require('./config/firebase');
 const { createLogger } = require('./utils/logger');
-const { publishContentHandler, syncPinterestBoards, generatePinterestTokens, generateTikTokTokens} = require('./handlers/publishContent');
+const { publishContentHandler, republishPostHandler, syncPinterestBoards, generatePinterestTokens, generateTikTokTokens} = require('./handlers/publishContent');
 
 const log = createLogger('index');
 
@@ -34,6 +34,10 @@ const { admin, db, storage } = initFirebase();
 
 app.get('/api/content/publish', async (req, res) => {
   return publishContentHandler({ db, storage }, req, res);
+});
+
+app.get('/api/content/republish', async (req, res) => {
+  return republishPostHandler({ db, storage }, req, res);
 });
 
 app.get('/api/pinterest/sync-boards', async (req, res) => {

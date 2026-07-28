@@ -37,29 +37,18 @@ async function getPageAccessToken(baseUrl, accessToken, maxAttempts = 3) {
     throw new Error('Failed to obtain a valid Facebook Page access token after retries');
 }
 
-// 'EXPLICIT' is Meta's provenance_type for third-party self-disclosure, as
-// opposed to the EXPLICIT_* values reserved for Meta's own in-app AI tools.
-function provenanceInfo() {
-    return { is_gen_ai: true, provenance_type: 'EXPLICIT' };
-}
-
 async function uploadToMyPage(baseUrl, pageAccessToken, post) {
 
     try {
-        const aiGenerated = isAiGenerated(post);
         // 1. Upload Photos as "Temporary" to the Page
         const mediaIds = [];
         for (const med of post.media) {
-            const photoPayload = {
+            const photo = await axios.post(`${baseUrl}/photos`, {
                 url: med.signedUrl,
                 published: false, // Don't post yet
                 temporary: true,  // Important for personal apps
                 access_token: pageAccessToken
-            };
-            if (aiGenerated) {
-                photoPayload.provenance_info = provenanceInfo();
-            }
-            const photo = await axios.post(`${baseUrl}/photos`, photoPayload);
+            });
             mediaIds.push({media_fbid: photo.data.id});
         }
 
@@ -79,21 +68,17 @@ async function uploadToMyPage(baseUrl, pageAccessToken, post) {
     }
 }
 
-async function uploadStory(baseUrl, pageAccessToken, media, aiGenerated){
+async function uploadStory(baseUrl, pageAccessToken, media){
     let creation_id = "";
     if (media && media.mediaType === "image") {
         console.log('Step 1: Uploading un-published target photo to page asset library...');
 
         // 1. Upload photo to the page with published=false parameter
-        const photoPayload = {
+        const uploadRes = await axios.post(baseUrl + '/photos', {
             url: media.signedUrl,
             published: false,
             access_token: pageAccessToken
-        };
-        if (aiGenerated) {
-            photoPayload.provenance_info = provenanceInfo();
-        }
-        const uploadRes = await axios.post(baseUrl + '/photos', photoPayload);
+        });
 
         const photoId = uploadRes.data.id;
         console.log(`Photo uploaded. Asset Photo ID: ${photoId}`);
@@ -188,15 +173,11 @@ async function publishToFacebook(post, account) {
 
         switch (mediaType) {
             case 'IMAGE':
-                const imagePayload = {
+                const imageResponse = await axios.post(baseUrl + '/photos', {
                     url: post.media[0].signedUrl,
                     caption: post.postText,
                     access_token: pageAccessToken
-                };
-                if (aiGenerated) {
-                    imagePayload.provenance_info = provenanceInfo();
-                }
-                const imageResponse = await axios.post(baseUrl + '/photos', imagePayload);
+                });
                 res.creation_id = imageResponse.data.id;
                 break;
 
@@ -256,7 +237,7 @@ async function publishToFacebook(post, account) {
             case 'STORY':
                 let creation_id = []
                 for (const med of post.media) {
-                    const id = await uploadStory(baseUrl, pageAccessToken, med, aiGenerated)
+                    const id = await uploadStory(baseUrl, pageAccessToken, med)
                     creation_id.push(id)
                 }
                 res.creation_id = creation_id

@@ -10,6 +10,21 @@ const { Timestamp } = require('firebase-admin/firestore');
 
 const log = createLogger('publishContent');
 
+async function dispatchToPlatform(post, account, storage, db) {
+  if (account.platform === 'Instagram') {
+    return uploadToInstagram(post, account);
+  } else if (account.platform === 'Facebook') {
+    return uploadToFacebook(post, account);
+  } else if (account.platform === 'Pinterest') {
+    return publishToPinterest(post, account, storage);
+  } else if (account.platform === 'YouTube') {
+    return publishToYouTube(post, account, storage);
+  } else if (account.platform === 'TikTok') {
+    return publishToTikTok(post, account, storage, db);
+  }
+  return null;
+}
+
 async function publishContentHandler({ db, storage }, req, res) {
   try {
     const ttlMs = 60 * 60 * 1000;
@@ -93,17 +108,8 @@ async function publishContentHandler({ db, storage }, req, res) {
 
           let result;
           try {
-            if (account.platform === 'Instagram') {
-              result = await uploadToInstagram(post, account);
-            } else if (account.platform === 'Facebook') {
-              result = await uploadToFacebook(post, account);
-            } else if (account.platform === 'Pinterest') {
-              result = await publishToPinterest(post, account, storage);
-            } else if (account.platform === 'YouTube') {
-              result = await publishToYouTube(post, account, storage);
-            } else if (account.platform === 'TikTok') {
-              result = await publishToTikTok(post, account, storage, db);
-            } else {
+            result = await dispatchToPlatform(post, account, storage, db);
+            if (result === null) {
               return { account, upload: null };
             }
           } catch (error) {
@@ -180,6 +186,91 @@ async function publishContentHandler({ db, storage }, req, res) {
     res.json({ count: processedPosts.length, posts: processedPosts });
   } catch (err) {
     log.error('publishContentHandler failed', {}, err);
+    res.status(500).json({ error: 'Internal error', details: String(err && err.message ? err.message : err) });
+  }
+}
+
+async function republishPostHandler({ db, storage }, req, res) {
+  try {
+    const { id, platform } = req.query;
+    if (!id || !platform) {
+      return res.status(400).json({ error: 'Missing required query params: id, platform' });
+    }
+
+    const docRef = db.collection('posts').doc(id);
+    const snap = await docRef.get();
+    if (!snap.exists) {
+      return res.status(404).json({ error: `Post ${id} not found` });
+    }
+
+    const ttlMs = 60 * 60 * 1000;
+    let post;
+    try {
+      const hydrated = await hydratePostUrls(storage, snap.data(), ttlMs);
+      post = { id: docRef.id, ...hydrated };
+    } catch (error) {
+      log.error('Failed to hydrate media URLs for post', { postId: id }, error);
+      return res.status(500).json({ error: 'Failed to hydrate media URLs', details: error.message });
+    }
+
+    const accountIds = Array.isArray(post.accountIds) ? post.accountIds : [];
+    if (accountIds.length === 0) {
+      return res.status(400).json({ error: 'Post has no linked accounts' });
+    }
+
+    const refs = accountIds.map((accountId) => db.collection('platform_accounts').doc(accountId));
+    const snaps = await db.getAll(...refs);
+    const platformLower = String(platform).toLowerCase();
+    const targetAccounts = snaps
+      .filter((s) => s.exists)
+      .map((s) => ({ id: s.id, ...s.data() }))
+      .filter((account) => String(account.platform).toLowerCase() === platformLower);
+
+    if (targetAccounts.length === 0) {
+      return res.status(404).json({ error: `No linked ${platform} account found on post ${id}` });
+    }
+
+    const uploads = await Promise.all(
+      targetAccounts.map(async (account) => {
+        const logContext = { postId: post.id, accountId: account.id, platform: account.platform };
+        let result;
+        try {
+          result = await dispatchToPlatform(post, account, storage, db);
+        } catch (error) {
+          log.error('Platform upload threw unexpectedly', logContext, error);
+          result = { status: 'Failed', error: error.message };
+        }
+
+        const upload = { accountId: account.id, ...result };
+        try {
+          await docRef.update({ [`platformStatuses.${account.id}`]: upload });
+        } catch (error) {
+          log.error('Failed to persist platform status for account', logContext, error);
+        }
+
+        return upload;
+      })
+    );
+
+    // Recompute the post's overall status from every linked account, not just
+    // the platform we just retried, so a successful retry can heal a post
+    // back to 'Published' after a prior partial failure.
+    const existingStatuses = post.platformStatuses && typeof post.platformStatuses === 'object' ? post.platformStatuses : {};
+    const mergedStatuses = { ...existingStatuses };
+    uploads.forEach((upload) => {
+      if (upload && upload.accountId) mergedStatuses[upload.accountId] = upload;
+    });
+    const allSucceeded = accountIds.every((accountId) => {
+      const status = mergedStatuses[accountId];
+      return status && (status.status === 'Published' || status.status === 'Uploaded');
+    });
+    const finalStatus = allSucceeded ? 'Published' : 'Failed';
+
+    await docRef.update({ platformStatuses: mergedStatuses, status: finalStatus, lastUpdated: Timestamp.now() });
+
+    res.json({ postId: id, platform, status: finalStatus, uploads });
+  } catch (err) {
+    log.error('republishPostHandler failed', {}, err);
     res.status(500).json({ error: 'Internal error', details: String(err && err.message ? err.message : err) });
   }
 }
@@ -327,6 +418,7 @@ async function generateTikTokTokens(db, req, res) {
 
 module.exports = {
     publishContentHandler,
+    republishPostHandler,
     syncPinterestBoards,
     generatePinterestTokens,
     generateTikTokTokens,
