@@ -67,10 +67,23 @@ function parseGsUrl(gsUrl) {
     return { bucketName, objectKey };
 }
 
+// Pinterest's anti-spam system intermittently rejects pins with
+// code:1 "Sorry! This site doesn't allow you to save Pins." when the exact
+// same destination URL is saved repeatedly (e.g. recycled evergreen
+// content scheduled across multiple posts). Appending a unique per-post
+// query param keeps the destination working while making each pin's link
+// distinct.
+function withPinTrackingParam(url, postId) {
+    if (!url) return url;
+    const separator = url.includes('?') ? '&' : '?';
+    return `${url}${separator}utm_source=pinterest&utm_pin=${encodeURIComponent(postId)}`;
+}
+
 async function publishToPinterest(post, account, storage) {
     const accessToken = account.accessToken;
     const mediaType = mediaTypes[post.type] || 'image';
     const boardId = post.pinBoard[account.id].board;
+    const pinLink = withPinTrackingParam(post.pinBoard[account.id].url, post.id);
 
     if (!accessToken || !boardId) {
         return {
@@ -93,7 +106,7 @@ async function publishToPinterest(post, account, storage) {
             case 'image':
                 const imagePayload = {
                     board_id: boardId,
-                    link: post.pinBoard[account.id].url,
+                    link: pinLink,
                     media_source: {
                         source_type: 'image_url',
                         url: post.media[0].signedUrl
@@ -171,7 +184,7 @@ async function publishToPinterest(post, account, storage) {
                         `${pinterestAPIUrl}/pins`,
                         {
                             board_id: boardId,
-                            link: post.pinBoard[account.id].url,
+                            link: pinLink,
                             title: post.title,
                             description: post.caption,
                             media_source: {
@@ -204,7 +217,7 @@ async function publishToPinterest(post, account, storage) {
                     title: post.title,
                     description: post.caption,
                     board_id: boardId,
-                    link: post.pinBoard[account.id].url,
+                    link: pinLink,
                     media_source: {
                         source_type: "multiple_image_urls",
                         items: carouselItems
