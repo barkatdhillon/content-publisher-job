@@ -41,6 +41,9 @@ async function publishContentHandler({ db, storage }, req, res) {
     const earlierTimestamp = Timestamp.fromDate(fifteenMinutesAgo);
 
     const processedPosts = [];
+    // Tracked outside the loop so the outer catch can still report which
+    // post was being processed when an unexpected error escaped.
+    let lastPostId = null;
 
     // Process one post at a time: claim it, publish it, then look for the
     // next one. This lets any number of instances run this same query
@@ -62,6 +65,7 @@ async function publishContentHandler({ db, storage }, req, res) {
       }
 
       const docRef = snapshot.docs[0].ref;
+      lastPostId = docRef.id;
 
       const claimedData = await db.runTransaction(async (transaction) => {
         const fresh = await transaction.get(docRef);
@@ -185,7 +189,7 @@ async function publishContentHandler({ db, storage }, req, res) {
 
     res.json({ count: processedPosts.length, posts: processedPosts });
   } catch (err) {
-    log.error('publishContentHandler failed', {}, err);
+    log.error('publishContentHandler failed', { postId: lastPostId }, err);
     res.status(500).json({ error: 'Internal error', details: String(err && err.message ? err.message : err) });
   }
 }
@@ -270,7 +274,7 @@ async function republishPostHandler({ db, storage }, req, res) {
 
     res.json({ postId: id, platform, status: finalStatus, uploads });
   } catch (err) {
-    log.error('republishPostHandler failed', {}, err);
+    log.error('republishPostHandler failed', { postId: req.query && req.query.id }, err);
     res.status(500).json({ error: 'Internal error', details: String(err && err.message ? err.message : err) });
   }
 }

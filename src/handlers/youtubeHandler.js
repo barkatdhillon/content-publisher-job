@@ -29,7 +29,7 @@ function sanitizeYoutubeText(text, maxLength) {
     return text.replace(/[<>]/g, '').slice(0, maxLength);
 }
 
-async function postAndBoostComment(videoId, commentText, oauth2Client) {
+async function postAndBoostComment(postId, videoId, commentText, oauth2Client) {
     const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
     try {
         const threadResponse = await youtube.commentThreads.insert({
@@ -56,7 +56,7 @@ async function postAndBoostComment(videoId, commentText, oauth2Client) {
 
         return commentId;
     } catch (error) {
-        log.error('Failed to post/boost first comment', { videoId }, error);
+        log.error('Failed to post/boost first comment', { postId, videoId }, error);
         return null;
     }
 }
@@ -151,7 +151,7 @@ async function publishToYouTube(post, account, storage) {
                         res.creation_id = response.data.id;
 
                         if (firstComment && res.creation_id) {
-                            const commentId = await postAndBoostComment(res.creation_id, firstComment, oauth2Client);
+                            const commentId = await postAndBoostComment(post.id, res.creation_id, firstComment, oauth2Client);
                             if (commentId) {
                                 res.first_comment_id = commentId;
                             }

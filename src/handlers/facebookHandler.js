@@ -59,19 +59,19 @@ async function uploadToMyPage(baseUrl, pageAccessToken, post) {
             access_token: pageAccessToken
         });
 
-        console.log("Success! Post ID:", postResponse.data.id);
+        log.info('Facebook carousel post published', { postId: post.id, creationId: postResponse.data.id });
         return postResponse.data.id;
     } catch (err) {
         // This will print the EXACT reason it fails (e.g. missing scope)
-        log.error('uploadToMyPage failed', {}, err);
+        log.error('uploadToMyPage failed', { postId: post && post.id }, err);
         throw err;
     }
 }
 
-async function uploadStory(baseUrl, pageAccessToken, media){
+async function uploadStory(baseUrl, pageAccessToken, media, postId){
     let creation_id = "";
     if (media && media.mediaType === "image") {
-        console.log('Step 1: Uploading un-published target photo to page asset library...');
+        log.info('Facebook story: uploading photo asset', { postId });
 
         // 1. Upload photo to the page with published=false parameter
         const uploadRes = await axios.post(baseUrl + '/photos', {
@@ -81,10 +81,10 @@ async function uploadStory(baseUrl, pageAccessToken, media){
         });
 
         const photoId = uploadRes.data.id;
-        console.log(`Photo uploaded. Asset Photo ID: ${photoId}`);
+        log.info('Facebook story: photo asset uploaded', { postId, photoId });
 
         // 2. Attach the generated photo ID to a new Story element
-        console.log('Step 2: Committing photo asset into Page Stories...');
+        log.info('Facebook story: committing photo to Page Stories', { postId, photoId });
         const storyRes = await axios.post(baseUrl + '/photo_stories', {
             photo_id: photoId,
             access_token: pageAccessToken
@@ -93,7 +93,7 @@ async function uploadStory(baseUrl, pageAccessToken, media){
         creation_id = storyRes.data.post_id;
 
     } else if (media && media.mediaType === "video") {
-        console.log('Step 1: Requesting upload endpoint for remote URL ingestion...');
+        log.info('Facebook story: requesting video upload endpoint', { postId });
 
         const initResponse = await axios.post(baseUrl + '/video_stories', {
             upload_phase: 'start',
@@ -102,13 +102,12 @@ async function uploadStory(baseUrl, pageAccessToken, media){
 
         // Meta returns a special "upload_url" endpoint alongside the video_id
         const { video_id, upload_url } = initResponse.data;
-        console.log(`Initialized. Video ID: ${video_id}`);
-        console.log(`Target Processing Gateway: ${upload_url}`);
+        log.info('Facebook story: video upload initialized', { postId, videoId: video_id });
 
         // ==========================================
         // STEP 2: TRIGGER THE META DOWNLOAD INGESTION
         // ==========================================
-        console.log('Step 2: Pushing cloud target pointer to Meta gateway...');
+        log.info('Facebook story: pushing video pointer to Meta gateway', { postId, videoId: video_id });
 
         // We make an authorized POST call directly to the target upload_url,
         // passing the public video address in the custom file_url header.
@@ -119,14 +118,14 @@ async function uploadStory(baseUrl, pageAccessToken, media){
             }
         });
 
-        console.log('Meta ingestion agent acknowledged file stream:', ingestResponse.data);
+        log.info('Facebook story: video ingestion acknowledged', { postId, videoId: video_id, data: ingestResponse.data });
 
         // ==========================================
         // STEP 3: IMMEDIATELY COMMIT/FINISH THE STORY
         // ==========================================
         // Crucial: For remote file urls via stories, don't stall in a polling loop!
         // Tell Meta to commit the upload tracking ID right away.
-        console.log('Step 3: Registering complete chunk status and publishing...');
+        log.info('Facebook story: finalizing video story', { postId, videoId: video_id });
 
         const finishResponse = await axios.post(baseUrl + '/video_stories', {
             upload_phase: 'finish',
@@ -134,7 +133,7 @@ async function uploadStory(baseUrl, pageAccessToken, media){
             access_token: pageAccessToken,
         });
 
-        console.log('Success! Finalizing token registration on feed.', finishResponse.data);
+        log.info('Facebook story: video story published', { postId, videoId: video_id, data: finishResponse.data });
         creation_id = finishResponse.data.post_id;
     }
     return creation_id;
@@ -237,7 +236,7 @@ async function publishToFacebook(post, account) {
             case 'STORY':
                 let creation_id = []
                 for (const med of post.media) {
-                    const id = await uploadStory(baseUrl, pageAccessToken, med)
+                    const id = await uploadStory(baseUrl, pageAccessToken, med, post.id)
                     creation_id.push(id)
                 }
                 res.creation_id = creation_id

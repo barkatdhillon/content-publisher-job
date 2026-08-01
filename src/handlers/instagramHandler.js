@@ -18,7 +18,7 @@ function isAiGenerated(post) {
     return !!(post && post.isAiGenerated === true);
 }
 
-async function waitUntilFinished(containerId, token, maxAttempts = 30) {
+async function waitUntilFinished(containerId, token, postId, maxAttempts = 30) {
     let attempts = 0;
 
     while (attempts < maxAttempts) {
@@ -41,7 +41,7 @@ async function waitUntilFinished(containerId, token, maxAttempts = 30) {
         }
 
         attempts++;
-        console.log(`Sleep for 5 seconds - ${attempts} attempts`);
+        log.info('Instagram media processing not finished yet, waiting', { postId, containerId, attempts });
         await sleep(5000); // wait 5 seconds before checking again
     }
 
@@ -52,7 +52,7 @@ async function waitUntilFinished(containerId, token, maxAttempts = 30) {
 // backend is actually ready to accept /media_publish - most common with
 // carousels. Retry a few times on that specific transient error before
 // giving up.
-async function publishMedia(baseUrl, creationId, accessToken, maxAttempts = 4) {
+async function publishMedia(baseUrl, creationId, accessToken, postId, maxAttempts = 4) {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
             const publishResponse = await axios.post(baseUrl + `/media_publish`, {
@@ -64,7 +64,7 @@ async function publishMedia(baseUrl, creationId, accessToken, maxAttempts = 4) {
             const subcode = error.response?.data?.error?.error_subcode;
             const notReadyYet = subcode === 2207027;
             if (notReadyYet && attempt < maxAttempts) {
-                console.log(`Media ${creationId} not ready to publish yet, retrying (${attempt}/${maxAttempts})...`);
+                log.info('Instagram media not ready to publish yet, retrying', { postId, creationId, attempt, maxAttempts });
                 await sleep(5000);
                 continue;
             }
@@ -73,15 +73,15 @@ async function publishMedia(baseUrl, creationId, accessToken, maxAttempts = 4) {
     }
 }
 
-async function uploadStory(baseUrl, accessToken, media, aiGenerated) {
+async function uploadStory(baseUrl, accessToken, media, aiGenerated, postId) {
     // 1. Detect media type based on file extension extension
     const isVideo = media.mediaType === 'video';
-    console.log(`\n--- Starting Instagram Story Pipeline [Type: ${isVideo ? 'VIDEO' : 'IMAGE'}] ---`);
+    log.info('Instagram story: starting upload pipeline', { postId, mediaType: isVideo ? 'VIDEO' : 'IMAGE' });
 
     // ==========================================
     // STEP 1: CREATE THE CONTAINER
     // ==========================================
-    console.log('Step 1: Requesting item container initialization...');
+    log.info('Instagram story: requesting container initialization', { postId });
 
     // Base parameters required for all Instagram Stories
     const containerParams = {
@@ -180,7 +180,7 @@ async function publishToInstagram(post, account) {
                         payload.image_url = med.signedUrl;
                     }
                     const itemResponse = await axios.post(baseUrl + '/media', payload);
-                    await waitUntilFinished(itemResponse.data.id, accessToken);
+                    await waitUntilFinished(itemResponse.data.id, accessToken, post.id);
                     containerIds.push(itemResponse.data.id);
                 }
                 const carouselResponse = await axios.post(baseUrl + '/media', {
@@ -196,7 +196,7 @@ async function publishToInstagram(post, account) {
             case 'STORY':
                 let creation_id = []
                 for (const med of post.media) {
-                    const id = await uploadStory(baseUrl, accessToken, med, aiGenerated)
+                    const id = await uploadStory(baseUrl, accessToken, med, aiGenerated, post.id)
                     creation_id.push(id)
                 }
                 res.creation_id = creation_id
@@ -213,15 +213,15 @@ async function publishToInstagram(post, account) {
             let publishIds = []
             for(const creation_id of res.creation_id) {
                 // wait for container to be ready
-                await waitUntilFinished(creation_id, accessToken);
-                const publishId = await publishMedia(baseUrl, creation_id, accessToken);
+                await waitUntilFinished(creation_id, accessToken, post.id);
+                const publishId = await publishMedia(baseUrl, creation_id, accessToken, post.id);
                 publishIds.push(publishId);
             }
             out.publish_id = publishIds;
         } else {
             // wait for container to be ready
-            await waitUntilFinished(res.creation_id, accessToken);
-            out.publish_id = await publishMedia(baseUrl, res.creation_id, accessToken);
+            await waitUntilFinished(res.creation_id, accessToken, post.id);
+            out.publish_id = await publishMedia(baseUrl, res.creation_id, accessToken, post.id);
             if (firstComment && out.publish_id) {
                 try {
                     const commentResponse = await axios.post(`${instagramAPIUrl}/${out.publish_id}/comments`, {
