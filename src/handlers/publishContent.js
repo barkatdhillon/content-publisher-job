@@ -187,11 +187,62 @@ async function publishContentHandler({ db, storage }, req, res) {
       processedPosts.push({ ...post, platformStatuses: nextPlatformStatuses, status: finalStatus });
     }
 
-    res.json({ count: processedPosts.length, posts: processedPosts });
+    // Once the scheduled backlog is clear, use the same invocation to sweep
+    // up posts still stuck at 'Failed' from earlier runs and retry just the
+    // platforms that didn't already succeed.
+    let retriedFailedPosts = { count: 0, results: [] };
+    try {
+      retriedFailedPosts = await retryFailedPosts({ db, storage });
+    } catch (error) {
+      log.error('retryFailedPosts failed', {}, error);
+    }
+
+    res.json({ count: processedPosts.length, posts: processedPosts, retriedFailedPosts });
   } catch (err) {
     log.error('publishContentHandler failed', { postId: lastPostId }, err);
     res.status(500).json({ error: 'Internal error', details: String(err && err.message ? err.message : err) });
   }
+}
+
+// Publishes `post` to each account in `targetAccounts`, persists each
+// account's result immediately, and merges it into the post's full set of
+// platformStatuses (covering every account in `accountIds`, not just the
+// ones just retried) so callers can tell whether the post is now fully
+// resolved.
+async function retryAccounts(docRef, post, accountIds, targetAccounts, storage, db) {
+  const uploads = await Promise.all(
+    targetAccounts.map(async (account) => {
+      const logContext = { postId: post.id, accountId: account.id, platform: account.platform };
+      let result;
+      try {
+        result = await dispatchToPlatform(post, account, storage, db);
+      } catch (error) {
+        log.error('Platform upload threw unexpectedly', logContext, error);
+        result = { status: 'Failed', error: error.message };
+      }
+
+      const upload = { accountId: account.id, ...result };
+      try {
+        await docRef.update({ [`platformStatuses.${account.id}`]: upload });
+      } catch (error) {
+        log.error('Failed to persist platform status for account', logContext, error);
+      }
+
+      return upload;
+    })
+  );
+
+  const existingStatuses = post.platformStatuses && typeof post.platformStatuses === 'object' ? post.platformStatuses : {};
+  const mergedStatuses = { ...existingStatuses };
+  uploads.forEach((upload) => {
+    if (upload && upload.accountId) mergedStatuses[upload.accountId] = upload;
+  });
+  const allSucceeded = accountIds.every((accountId) => {
+    const status = mergedStatuses[accountId];
+    return status && (status.status === 'Published' || status.status === 'Uploaded');
+  });
+
+  return { uploads, mergedStatuses, allSucceeded };
 }
 
 async function republishPostHandler({ db, storage }, req, res) {
@@ -234,40 +285,10 @@ async function republishPostHandler({ db, storage }, req, res) {
       return res.status(404).json({ error: `No linked ${platform} account found on post ${id}` });
     }
 
-    const uploads = await Promise.all(
-      targetAccounts.map(async (account) => {
-        const logContext = { postId: post.id, accountId: account.id, platform: account.platform };
-        let result;
-        try {
-          result = await dispatchToPlatform(post, account, storage, db);
-        } catch (error) {
-          log.error('Platform upload threw unexpectedly', logContext, error);
-          result = { status: 'Failed', error: error.message };
-        }
-
-        const upload = { accountId: account.id, ...result };
-        try {
-          await docRef.update({ [`platformStatuses.${account.id}`]: upload });
-        } catch (error) {
-          log.error('Failed to persist platform status for account', logContext, error);
-        }
-
-        return upload;
-      })
-    );
-
-    // Recompute the post's overall status from every linked account, not just
-    // the platform we just retried, so a successful retry can heal a post
-    // back to 'Published' after a prior partial failure.
-    const existingStatuses = post.platformStatuses && typeof post.platformStatuses === 'object' ? post.platformStatuses : {};
-    const mergedStatuses = { ...existingStatuses };
-    uploads.forEach((upload) => {
-      if (upload && upload.accountId) mergedStatuses[upload.accountId] = upload;
-    });
-    const allSucceeded = accountIds.every((accountId) => {
-      const status = mergedStatuses[accountId];
-      return status && (status.status === 'Published' || status.status === 'Uploaded');
-    });
+    // Recomputes the post's overall status from every linked account, not
+    // just the platform we just retried, so a successful retry can heal a
+    // post back to 'Published' after a prior partial failure.
+    const { uploads, mergedStatuses, allSucceeded } = await retryAccounts(docRef, post, accountIds, targetAccounts, storage, db);
     const finalStatus = allSucceeded ? 'Published' : 'Failed';
 
     await docRef.update({ platformStatuses: mergedStatuses, status: finalStatus, lastUpdated: Timestamp.now() });
@@ -277,6 +298,120 @@ async function republishPostHandler({ db, storage }, req, res) {
     log.error('republishPostHandler failed', { postId: req.query && req.query.id }, err);
     res.status(500).json({ error: 'Internal error', details: String(err && err.message ? err.message : err) });
   }
+}
+
+// Retries posts stuck at status 'Failed' (scheduled within the last 24h,
+// under maxTries attempts), publishing only to the accounts that didn't
+// already succeed. Called from the tail of publishContentHandler rather
+// than exposed as its own endpoint.
+async function retryFailedPosts({ db, storage }) {
+  const ttlMs = 60 * 60 * 1000;
+  const maxTries = 5;
+
+  const now = new Date();
+  const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const nowTimestamp = Timestamp.fromDate(now);
+  const earlierTimestamp = Timestamp.fromDate(twentyFourHoursAgo);
+
+  let query = db.collection('posts');
+  query = applyStatusFilter(query, ['Failed']);
+  query = query
+    .where('scheduledPublishTime', '>=', earlierTimestamp)
+    .where('scheduledPublishTime', '<=', nowTimestamp);
+  const snapshot = await query.get();
+
+  log.info('retryFailedPosts: sweep started', { failedPostsFound: snapshot.size, maxTries });
+
+  const results = [];
+
+  for (const doc of snapshot.docs) {
+    const data = doc.data();
+    // tries has no writer yet on existing docs, so Firestore has no
+    // 'tries' field to filter on in the query above - treat missing as 0
+    // in application code instead.
+    const tries = typeof data.tries === 'number' ? data.tries : 0;
+    if (tries >= maxTries) {
+      log.info('retryFailedPosts: skipping post - max tries reached', { postId: doc.id, tries, maxTries });
+      continue;
+    }
+
+    const docRef = doc.ref;
+    let post;
+    try {
+      const hydrated = await hydratePostUrls(storage, data, ttlMs);
+      post = { id: doc.id, ...hydrated };
+    } catch (error) {
+      log.error('retryFailedPosts: failed to hydrate media URLs for post', { postId: doc.id, tries: tries + 1 }, error);
+      await docRef.update({ tries: tries + 1 });
+      results.push({ postId: doc.id, status: 'Failed', tries: tries + 1, error: 'Failed to hydrate media URLs' });
+      continue;
+    }
+
+    const accountIds = Array.isArray(post.accountIds) ? post.accountIds : [];
+    const platformStatuses = post.platformStatuses && typeof post.platformStatuses === 'object' ? post.platformStatuses : {};
+
+    // Only retry accounts that didn't already succeed - a post can be
+    // 'Failed' overall while some of its platforms already published.
+    const failingAccountIds = accountIds.filter((accountId) => {
+      const status = platformStatuses[accountId];
+      return !status || !(status.status === 'Published' || status.status === 'Uploaded');
+    });
+
+    if (failingAccountIds.length === 0) {
+      log.info('retryFailedPosts: no failing accounts left to retry, skipping', { postId: post.id, tries });
+      continue;
+    }
+
+    const refs = failingAccountIds.map((accountId) => db.collection('platform_accounts').doc(accountId));
+    const snaps = await db.getAll(...refs);
+    const targetAccounts = snaps.filter((s) => s.exists).map((s) => ({ id: s.id, ...s.data() }));
+
+    log.info('retryFailedPosts: retrying post', {
+      postId: post.id,
+      attempt: tries + 1,
+      maxTries,
+      platforms: targetAccounts.map((account) => `${account.platform}:${account.id}`)
+    });
+
+    const { uploads, mergedStatuses, allSucceeded } = await retryAccounts(docRef, post, accountIds, targetAccounts, storage, db);
+    const finalStatus = allSucceeded ? 'Published' : 'Failed';
+    const nextTries = allSucceeded ? tries : tries + 1;
+
+    const accountsById = new Map(targetAccounts.map((account) => [account.id, account]));
+    uploads.forEach((upload) => {
+      const account = accountsById.get(upload.accountId);
+      const succeeded = upload.status === 'Published' || upload.status === 'Uploaded';
+      const logFn = succeeded ? log.info : log.warn;
+      logFn(`retryFailedPosts: platform retry ${succeeded ? 'succeeded' : 'failed again'}`, {
+        postId: post.id,
+        accountId: upload.accountId,
+        platform: account && account.platform,
+        tries: nextTries,
+        status: upload.status
+      });
+    });
+
+    await docRef.update({
+      platformStatuses: mergedStatuses,
+      status: finalStatus,
+      tries: nextTries,
+      lastUpdated: Timestamp.now()
+    });
+
+    const postLogFn = allSucceeded ? log.info : log.warn;
+    postLogFn(`retryFailedPosts: post retry ${allSucceeded ? 'succeeded' : 'still failing'}`, {
+      postId: post.id,
+      status: finalStatus,
+      tries: nextTries,
+      maxTries
+    });
+
+    results.push({ postId: post.id, status: finalStatus, tries: nextTries, uploads });
+  }
+
+  log.info('retryFailedPosts: sweep finished', { postsRetried: results.length });
+
+  return { count: results.length, results };
 }
 
 async function syncPinterestBoards(db, req, res) {
